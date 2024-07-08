@@ -38,4 +38,14 @@ Settings:
 
 - `whitelist`: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
 
+## Testing
+
+You can test your filters like so:
+
+```sh
+$ cargo build --release
+$ ./target/release/noteguard
+$ <test/test-inputs ./target/release/noteguard
+```
+
 [strfry]: https://github.com/hoytech/strfry
