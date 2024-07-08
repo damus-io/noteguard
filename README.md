@@ -3,6 +3,8 @@
 
 A high performance note filter plugin system for [strfry]
 
+WIP!
+
 ## Usage
 
 Filters are registered and loaded from the [noteguard.toml](noteguard.toml) config.
@@ -19,5 +21,21 @@ pipeline = ["ratelimit"]
 notes_per_second = 1
 whitelist = ["127.0.0.1"]
 ```
+
+## Filters
+
+You can use any of the builtin filters, or create your own!
+
+This is the initial release, and only includes one filter so far:
+
+### Ratelimit
+
+The ratelimit filter limits the rate at which notes are written to the relay per-ip.
+
+Settings:
+
+- `notes_per_second`: the delay in seconds between accepted notes. 1 means only one note can be written per second. 2 means only 1 note can be written every 2 seconds, etc. TODO: rename this because its confusing.
+
+- `whitelist`: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
 
 [strfry]: https://github.com/hoytech/strfry
