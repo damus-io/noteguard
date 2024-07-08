@@ -9,7 +9,7 @@ pub struct RateInfo {
 
 #[derive(Deserialize, Default)]
 pub struct RateLimit {
-    pub notes_per_second: u64,
+    pub delay_seconds: u64,
     pub whitelist: Option<Vec<String>>,
 
     #[serde(skip)]
@@ -27,7 +27,7 @@ impl NoteFilter for RateLimit {
         if self.sources.contains_key(&msg.source_info) {
             let now = Instant::now();
             let entry = self.sources.get_mut(&msg.source_info).expect("impossiburu");
-            if now - entry.last_note < Duration::from_secs(self.notes_per_second) {
+            if now - entry.last_note < Duration::from_secs(self.delay_seconds) {
                 return OutputMessage::new(
                     msg.event.id.clone(),
                     Action::Reject,

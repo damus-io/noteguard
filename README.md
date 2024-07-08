@@ -18,7 +18,7 @@ The `pipeline` config specifies the order in which filters are run. When the fir
 pipeline = ["ratelimit"]
 
 [filters.ratelimit]
-notes_per_second = 1
+delay_seconds = 1
 whitelist = ["127.0.0.1"]
 ```
 
@@ -34,7 +34,7 @@ The ratelimit filter limits the rate at which notes are written to the relay per
 
 Settings:
 
-- `notes_per_second`: the delay in seconds between accepted notes. 1 means only one note can be written per second. 2 means only 1 note can be written every 2 seconds, etc. TODO: rename this because its confusing.
+- `delay_seconds`: the delay in seconds between accepted notes. 1 means only one note can be written per second. 2 means only 1 note can be written every 2 seconds, etc.
 
 - `whitelist`: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
 

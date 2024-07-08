@@ -2,5 +2,5 @@
 pipeline = ["ratelimit"]
 
 [filters.ratelimit]
-notes_per_second = 1
+delay_seconds = 1
 whitelist = ["127.0.0.1"]
