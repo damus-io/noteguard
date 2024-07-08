@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+while true
+do
+	echo '{"type": "new","receivedAt":12345,"sourceType":"IP4","sourceInfo": "127.0.0.2","event":{"id": "68421a122cef086512b2c5bd29ca6285ced8bd8e302e347e3c5d90466c860a76","pubkey": "16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93","created_at": 1720408658,"kind": 1,"tags": [],"content": "hi","sig": "7b76471744ded2b720ca832cdc89e670f6093ce38aeef55a5c6a4e077883d7d80dda1e9051032fb1faa1c3c212c517e93ee42b3ceac8e8e9b04bad46a361de90"}}'
+
+	sleep 0.1
+done
+
