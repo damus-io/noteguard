@@ -2,5 +2,5 @@
 pipeline = ["ratelimit"]
 
 [filters.ratelimit]
-posts_per_minute = 10
-whitelist = ["127.0.0.10"]
+posts_per_minute = 8
+whitelist = ["127.0.0.1"]
