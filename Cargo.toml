@@ -1,0 +1,13 @@
+[package]
+name = "noteguard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.5"
+tracing = "0.1.40"
+
+
+

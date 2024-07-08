@@ -1,0 +1,7 @@
+target/
+.direnv/
+.buildcmd
+.build-result
+shell.nix
+.envrc
+tags
