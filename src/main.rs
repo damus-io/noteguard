@@ -73,7 +73,12 @@ impl Noteguard {
     fn load_config(&mut self, config: &Config) -> Result<(), toml::de::Error> {
         self.loaded_filters.clear();
 
-        for (name, config_value) in &config.filters {
+        for name in &config.pipeline {
+            let config_value = config
+                .filters
+                .get(name)
+                .unwrap_or_else(|| panic!("could not find filter configuration for {}", name));
+
             if let Some(constructor) = self.registered_filters.get(name.as_str()) {
                 let filter = constructor(config_value.clone())?;
                 self.loaded_filters.push(filter);
