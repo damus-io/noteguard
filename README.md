@@ -21,7 +21,7 @@ posts_per_minute = 8
 whitelist = ["127.0.0.1"]
 
 [filters.whitelist]
-#pubkeys = ["32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245"]
+pubkeys = ["32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245"]
 ips = ["127.0.0.1", "127.0.0.2"]
 ```
 
