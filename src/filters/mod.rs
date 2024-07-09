@@ -1,5 +1,5 @@
-mod rate_limit;
+mod ratelimit;
 mod whitelist;
 
-pub use rate_limit::RateLimit;
+pub use ratelimit::RateLimit;
 pub use whitelist::Whitelist;
