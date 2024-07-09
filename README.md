@@ -14,7 +14,7 @@ You can add any new filter you want by implementing the `NoteFilter` trait and r
 The `pipeline` config specifies the order in which filters are run. When the first `reject` or `shadowReject` action is hit, then the pipeline stops and returns the rejection error.
 
 ```toml
-pipeline = ["whitelist", "ratelimit"]
+pipeline = ["protected_events", "whitelist", "ratelimit"]
 
 [filters.ratelimit]
 posts_per_minute = 8
@@ -23,6 +23,8 @@ whitelist = ["127.0.0.1"]
 [filters.whitelist]
 pubkeys = ["32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245"]
 ips = ["127.0.0.1", "127.0.0.2"]
+
+[filters.protected_events]
 ```
 
 ## Filters
@@ -32,6 +34,8 @@ You can use any of the builtin filters, or create your own!
 This is the initial release, and only includes one filter so far:
 
 ### Ratelimit
+
+* name: `ratelimit`
 
 The ratelimit filter limits the rate at which notes are written to the relay per-ip.
 
@@ -43,6 +47,8 @@ Settings:
 
 ### Whitelist
 
+* name: `whitelist`
+
 The whitelist filter only allows notes to pass if it matches a particular pubkey or source ip:
 
 - `pubkeys` *optional*: a list of hex public keys to let through
@@ -50,6 +56,16 @@ The whitelist filter only allows notes to pass if it matches a particular pubkey
 - `ips` *optional*: a list of ip addresses to let through
 
 Either criteria can match
+
+### Protected Events
+
+See [nip70]
+
+* name: `protected_events`
+
+There are no config options, but an empty config entry is still needed:
+
+`[filters.protected_events]`
 
 ## Testing
 
@@ -62,3 +78,4 @@ $ <test/test-inputs ./target/release/noteguard
 ```
 
 [strfry]: https://github.com/hoytech/strfry
+[nip70]: https://github.com/nostr-protocol/nips/blob/protected-events-tag/70.md
