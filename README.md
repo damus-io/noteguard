@@ -39,15 +39,15 @@ Settings:
 
 - `notes_per_minute`: the number of notes per minute which are allowed to be written per ip.
 
-- `whitelist`: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
+- `whitelist` *optional*: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
 
 ### Whitelist
 
 The whitelist filter only allows notes to pass if it matches a particular pubkey or source ip:
 
-- `pubkeys`: a list of hex public keys to let through
+- `pubkeys` *optional*: a list of hex public keys to let through
 
-- `ips`: a list of ip addresses to let through
+- `ips` *optional*: a list of ip addresses to let through
 
 Either criteria can match
 
