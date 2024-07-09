@@ -41,7 +41,7 @@ Settings:
 
 - `whitelist`: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
 
-## Whitelist
+### Whitelist
 
 The whitelist filter only allows notes to pass if it matches a particular pubkey or source ip:
 
