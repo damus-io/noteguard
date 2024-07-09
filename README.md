@@ -72,9 +72,21 @@ There are no config options, but an empty config entry is still needed:
 You can test your filters like so:
 
 ```sh
-$ cargo build --release
-$ ./target/release/noteguard
-$ <test/test-inputs ./target/release/noteguard
+$ cargo build
+$ <test/inputs ./target/debug/noteguard
+$ ./test/delay | ./target/debug/noteguard
+```
+
+## Static builds
+
+Static musl builds are convenient ways to package noteguard for deployment. It enables you to copy the binary directly to your server, assuming its the same architecture as the one you're building on.
+
+```sh
+$ rustup target add x86_64-unknown-linux-musl
+$ cargo build --target x86_64-unknown-linux-musl --release
+$ ldd ./target/x86_64-unknown-linux-musl/release/noteguard
+	statically linked
+$ scp ./target/x86_64-unknown-linux-musl/release/noteguard server:
 ```
 
 [strfry]: https://github.com/hoytech/strfry
