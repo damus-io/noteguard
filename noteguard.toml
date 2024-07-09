@@ -1,6 +1,10 @@
 
-pipeline = ["ratelimit"]
+pipeline = ["whitelist", "ratelimit"]
 
 [filters.ratelimit]
 posts_per_minute = 8
 whitelist = ["127.0.0.1"]
+
+[filters.whitelist]
+pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
+ips = ["127.0.0.1"]

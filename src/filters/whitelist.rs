@@ -1,23 +1,31 @@
 use crate::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct Whitelist {
-    pub pubkeys: Vec<String>,
-    pub ips: Vec<String>,
+    pub pubkeys: Option<Vec<String>>,
+    pub ips: Option<Vec<String>>,
 }
 
 impl NoteFilter for Whitelist {
     fn filter_note(&mut self, msg: &InputMessage) -> OutputMessage {
-        if self.pubkeys.contains(&msg.event.pubkey) || self.ips.contains(&msg.source_info) {
-            OutputMessage::new(msg.event.id.clone(), Action::Accept, None)
-        } else {
-            OutputMessage::new(
-                msg.event.id.clone(),
-                Action::Reject,
-                Some("blocked: pubkey not on the whitelist".to_string()),
-            )
+        if let Some(pubkeys) = &self.pubkeys {
+            if pubkeys.contains(&msg.event.pubkey) {
+                return OutputMessage::new(msg.event.id.clone(), Action::Accept, None);
+            }
         }
+
+        if let Some(ips) = &self.ips {
+            if ips.contains(&msg.source_info) {
+                return OutputMessage::new(msg.event.id.clone(), Action::Accept, None);
+            }
+        }
+
+        OutputMessage::new(
+            msg.event.id.clone(),
+            Action::Reject,
+            Some("blocked: pubkey/ip not on the whitelist".to_string()),
+        )
     }
 
     fn name(&self) -> &'static str {

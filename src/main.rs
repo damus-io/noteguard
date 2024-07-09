@@ -1,4 +1,4 @@
-use noteguard::filters::RateLimit;
+use noteguard::filters::{RateLimit, Whitelist};
 use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -41,6 +41,7 @@ impl Noteguard {
     /// every new instance of [`Noteguard`]
     fn register_builtin_filters(&mut self) {
         self.register_filter::<RateLimit>();
+        self.register_filter::<Whitelist>();
     }
 
     /// Run the loaded filters. You must call `load_config` before calling this, otherwise
