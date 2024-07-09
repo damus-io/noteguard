@@ -1,4 +1,4 @@
-use noteguard::filters::{ProtectedEvents, RateLimit, Whitelist};
+use noteguard::filters::{Kinds, ProtectedEvents, RateLimit, Whitelist};
 use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -43,6 +43,7 @@ impl Noteguard {
         self.register_filter::<RateLimit>();
         self.register_filter::<Whitelist>();
         self.register_filter::<ProtectedEvents>();
+        self.register_filter::<Kinds>();
     }
 
     /// Run the loaded filters. You must call `load_config` before calling this, otherwise

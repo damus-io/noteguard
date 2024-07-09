@@ -14,15 +14,22 @@ You can add any new filter you want by implementing the `NoteFilter` trait and r
 The `pipeline` config specifies the order in which filters are run. When the first `reject` or `shadowReject` action is hit, then the pipeline stops and returns the rejection error.
 
 ```toml
-pipeline = ["protected_events", "whitelist", "ratelimit"]
+pipeline = ["protected_events", "kinds", "whitelist", "ratelimit"]
 
 [filters.ratelimit]
 posts_per_minute = 8
 whitelist = ["127.0.0.1"]
 
 [filters.whitelist]
-pubkeys = ["32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245"]
-ips = ["127.0.0.1", "127.0.0.2"]
+pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
+ips = ["127.0.0.1"]
+
+[filters.kinds]
+kinds = [30065, 1064]
+
+[filters.kinds.messages]
+30065 = "blocked: files on nostr is dumb"
+1064 = "blocked: files on nostr is dumb"
 
 [filters.protected_events]
 ```
@@ -56,6 +63,27 @@ The whitelist filter only allows notes to pass if it matches a particular pubkey
 - `ips` *optional*: a list of ip addresses to let through
 
 Either criteria can match
+
+### Kinds
+
+* name: `kinds`
+
+A filter that blacklists certain kinds
+
+- `kinds`: a list of kind integers to block
+
+- `kinds.messages` *optional*: a map of kinds to message to deliver when the kind is blocked
+
+Example:
+
+```toml
+[filters.kinds]
+kinds = [30065, 1064]
+
+[filters.kinds.messages]
+30065 = "blocked: files on nostr is dumb"
+1064 = "blocked: files on nostr is dumb"
+```
 
 ### Protected Events
 

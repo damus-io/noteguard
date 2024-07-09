@@ -1,5 +1,5 @@
 
-pipeline = ["protected_events", "whitelist", "ratelimit"]
+pipeline = ["protected_events", "kinds", "whitelist", "ratelimit"]
 
 [filters.ratelimit]
 posts_per_minute = 8
@@ -8,5 +8,14 @@ whitelist = ["127.0.0.1"]
 [filters.whitelist]
 pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
 ips = ["127.0.0.1"]
+
+[filters.kinds]
+kinds = [30065, 1064, 34550, 4550]
+
+[filters.kinds.messages]
+30065 = "blocked: files on nostr is dumb"
+1064 = "blocked: files on nostr is dumb"
+34550 = "blocked: please use a dedicated relay for moderated communities"
+4550 = "blocked: please use a dedicated relay for moderated communities"
 
 [filters.protected_events]
