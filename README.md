@@ -135,6 +135,12 @@ There are no config options, but an empty config entry is still needed:
 
 * name: `forwarder`
 
+You need to compile with the `forwarder` feature to enable this filter:
+
+```sh
+$ cargo build --features forwarder --release
+```
+
 The forwarder filter allows you to forward notes to another relay. Notes will
 be queued if the connection goes down (up to the `queue_size` buffer limit)
 
