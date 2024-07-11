@@ -1,9 +1,14 @@
 use noteguard::filters::{Kinds, ProtectedEvents, RateLimit, Whitelist};
+
+#[cfg(feature = "forwarder")]
+use noteguard::filters::Forwarder;
+
 use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
+use log::info;
 
 #[derive(Deserialize)]
 struct Config {
@@ -44,6 +49,9 @@ impl Noteguard {
         self.register_filter::<Whitelist>();
         self.register_filter::<ProtectedEvents>();
         self.register_filter::<Kinds>();
+
+        #[cfg(feature = "forwarder")]
+        self.register_filter::<Forwarder>();
     }
 
     /// Run the loaded filters. You must call `load_config` before calling this, otherwise
@@ -94,7 +102,21 @@ impl Noteguard {
     }
 }
 
+#[cfg(feature = "forwarder")]
+#[tokio::main]
+async fn main() {
+    noteguard();
+}
+
+#[cfg(not(feature = "forwarder"))]
 fn main() {
+    noteguard();
+}
+
+fn noteguard() {
+    env_logger::init();
+    info!("running noteguard");
+
     let config_path = "noteguard.toml";
     let mut noteguard = Noteguard::new();
 

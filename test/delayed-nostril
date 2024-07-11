@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+
+while true
+do
+	note="$(nostril --silent --content hello)"
+	echo "{\"type\": \"new\",\"receivedAt\":12345,\"sourceType\":\"IP4\",\"sourceInfo\": \"127.0.0.2\",\"event\":$note}"
+
+	sleep ${1:-0.1}
+done
+

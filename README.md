@@ -131,6 +131,18 @@ There are no config options, but an empty config entry is still needed:
 
 `[filters.protected_events]`
 
+### Forwarder
+
+* name: `forwarder`
+
+The forwarder filter allows you to forward notes to another relay. Notes will
+be queued if the connection goes down (up to the `queue_size` buffer limit)
+
+- `relay` - the relay to forward notes to, eg: `ws://localhost:8080`
+
+- `queue_size` *optional* - size of the note queue, this is used to buffer notes if the connection goes down
+
+
 ## Testing
 
 You can test your filters like so:

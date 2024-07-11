@@ -1,0 +1,8 @@
+
+pipeline = ["ratelimit", "forwarder"]
+
+[filters.forwarder]
+relay = "ws://127.0.0.1:8080"
+
+[filters.ratelimit]
+posts_per_minute = 3
