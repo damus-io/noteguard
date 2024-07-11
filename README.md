@@ -38,7 +38,9 @@ kinds = [30065, 1064]
 
 You can install noteguard by copying the binary to the strfry directory.
 
-Static musl builds are convenient ways to package noteguard for deployment. It enables you to copy the binary directly to your server, assuming its the same architecture as the one you're building on.
+Static musl builds are convenient ways to package noteguard for deployment. It enables you to copy the binary directly to your server, ensure that you are using the correct architecture that your server is running.
+
+You most likely want `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. Install this target with rustup, build noteguard, and copy the binary to the server:
 
 ```sh
 $ rustup target add x86_64-unknown-linux-musl
@@ -47,7 +49,17 @@ $ scp ./target/x86_64-unknown-linux-musl/release/noteguard server:strfry
 $ scp noteguard.toml server:strfry
 ```
 
-You can then setup your `strfry.conf` to use the noteguard by adding it as a writePolicy plugin:
+Test that the binary executes by running it on the server:
+
+```sh
+$ cd strfry
+$ <<<'{}' ./noteguard
+Failed to parse input: missing field `type` at line 1 column 2
+```
+
+Configure `noteguard.toml` with your preferred filters.
+
+Now you can then setup your `strfry.conf` to use the noteguard by adding it as a writePolicy plugin:
 
 ```
 writePolicy {
@@ -55,6 +67,8 @@ writePolicy {
     plugin = "./noteguard"
 }
 ```
+
+And you're done! Enjoy.
 
 ## Filters
 
