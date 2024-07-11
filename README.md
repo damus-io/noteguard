@@ -34,6 +34,28 @@ kinds = [30065, 1064]
 [filters.protected_events]
 ```
 
+## Installation
+
+You can install noteguard by copying the binary to the strfry directory.
+
+Static musl builds are convenient ways to package noteguard for deployment. It enables you to copy the binary directly to your server, assuming its the same architecture as the one you're building on.
+
+```sh
+$ rustup target add x86_64-unknown-linux-musl
+$ cargo build --target x86_64-unknown-linux-musl --release
+$ scp ./target/x86_64-unknown-linux-musl/release/noteguard server:strfry
+$ scp noteguard.toml server:strfry
+```
+
+You can then setup your `strfry.conf` to use the noteguard by adding it as a writePolicy plugin:
+
+```
+writePolicy {
+    # If non-empty, path to an executable script that implements the writePolicy plugin logic
+    plugin = "./noteguard"
+}
+```
+
 ## Filters
 
 You can use any of the builtin filters, or create your own!
@@ -103,18 +125,6 @@ You can test your filters like so:
 $ cargo build
 $ <test/inputs ./target/debug/noteguard
 $ ./test/delay | ./target/debug/noteguard
-```
-
-## Static builds
-
-Static musl builds are convenient ways to package noteguard for deployment. It enables you to copy the binary directly to your server, assuming its the same architecture as the one you're building on.
-
-```sh
-$ rustup target add x86_64-unknown-linux-musl
-$ cargo build --target x86_64-unknown-linux-musl --release
-$ ldd ./target/x86_64-unknown-linux-musl/release/noteguard
-	statically linked
-$ scp ./target/x86_64-unknown-linux-musl/release/noteguard server:
 ```
 
 [strfry]: https://github.com/hoytech/strfry
