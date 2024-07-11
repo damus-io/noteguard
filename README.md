@@ -146,7 +146,7 @@ be queued if the connection goes down (up to the `queue_size` buffer limit)
 
 - `relay` - the relay to forward notes to, eg: `ws://localhost:8080`
 
-- `queue_size` *optional* - size of the note queue, this is used to buffer notes if the connection goes down
+- `queue_size` *optional* - size of the note queue, this is used to buffer notes if the connection goes down. Default is 1000.
 
 
 ## Testing
