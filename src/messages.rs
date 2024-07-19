@@ -14,7 +14,7 @@ pub struct InputMessage {
     pub source_info: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Action {
     Accept,
