@@ -7,7 +7,7 @@ use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read};
 use log::info;
 
 #[derive(Deserialize)]
@@ -113,6 +113,11 @@ fn main() {
     noteguard();
 }
 
+fn serialize_output_message(msg: &OutputMessage) -> String {
+    serde_json::to_string(msg).expect("OutputMessage should always serialize correctly")
+}
+
+
 fn noteguard() {
     env_logger::init();
     info!("running noteguard");
@@ -133,41 +138,40 @@ fn noteguard() {
         .expect("Expected filter config to be loaded ok");
 
     let stdin = io::stdin();
-    let stdout = io::stdout();
-    let handle = stdout.lock();
-    let mut writer = io::BufWriter::new(handle);
 
-    for line in stdin.lock().lines() {
-        match line {
-            Ok(input) => {
-                let input_message: InputMessage = match serde_json::from_str(&input) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        eprintln!("Failed to parse input: {}", e);
-                        continue;
-                    }
-                };
-
-                if input_message.message_type != "new" {
-                    eprintln!("Unexpected request type");
-                    continue;
-                }
-
-                let output_message = noteguard.run(input_message);
-
-                match serde_json::to_string(&output_message) {
-                    Ok(json) => {
-                        writeln!(writer, "{}", json).unwrap();
-                        writer.flush().unwrap();
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to serialize output: {}", e);
-                    }
-                }
-            }
+    for line in stdin.lines() {
+        let line = match line {
+            Ok(line) => line,
             Err(e) => {
-                eprintln!("Failed to read line: {}", e);
+                eprintln!("Failed to get line: {}", e);
+                continue;
             }
+        };
+
+        let input_message: InputMessage = match serde_json::from_str(&line) {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("Failed to parse input: {}", e);
+                continue;
+            }
+        };
+
+        if input_message.message_type != "new" {
+            let out = OutputMessage::new(input_message.event.id.clone(), Action::Reject, Some("invalid strfry write policy input".to_string()));
+            println!("{}", serialize_output_message(&out));
+            continue;
         }
+
+        let out = noteguard.run(input_message);
+        let json = serialize_output_message(&out);
+
+        println!("{}", json);
+    }
+}
+
+
+
+
+
     }
 }
