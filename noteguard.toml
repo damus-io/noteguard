@@ -1,9 +1,12 @@
 
-pipeline = ["protected_events", "kinds", "whitelist", "ratelimit"]
+pipeline = ["protected_events", "kinds", "content", "whitelist", "ratelimit"]
 
 [filters.ratelimit]
 posts_per_minute = 8
 whitelist = ["127.0.0.1"]
+
+[filters.content]
+filters = ["https://cdn.nostr.build/i/some-spammy-or-abusive-image-image.png"]
 
 [filters.whitelist]
 pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
