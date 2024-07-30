@@ -1,14 +1,14 @@
-use noteguard::filters::{Kinds, ProtectedEvents, RateLimit, Whitelist};
+use noteguard::filters::{Content, Kinds, ProtectedEvents, RateLimit, Whitelist};
 
 #[cfg(feature = "forwarder")]
 use noteguard::filters::Forwarder;
 
+use log::info;
 use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{self, Read};
-use log::info;
 
 #[derive(Deserialize)]
 struct Config {
@@ -49,6 +49,7 @@ impl Noteguard {
         self.register_filter::<Whitelist>();
         self.register_filter::<ProtectedEvents>();
         self.register_filter::<Kinds>();
+        self.register_filter::<Content>();
 
         #[cfg(feature = "forwarder")]
         self.register_filter::<Forwarder>();
@@ -117,7 +118,6 @@ fn serialize_output_message(msg: &OutputMessage) -> String {
     serde_json::to_string(msg).expect("OutputMessage should always serialize correctly")
 }
 
-
 fn noteguard() {
     env_logger::init();
     info!("running noteguard");
@@ -157,7 +157,11 @@ fn noteguard() {
         };
 
         if input_message.message_type != "new" {
-            let out = OutputMessage::new(input_message.event.id.clone(), Action::Reject, Some("invalid strfry write policy input".to_string()));
+            let out = OutputMessage::new(
+                input_message.event.id.clone(),
+                Action::Reject,
+                Some("invalid strfry write policy input".to_string()),
+            );
             println!("{}", serialize_output_message(&out));
             continue;
         }
@@ -168,7 +172,6 @@ fn noteguard() {
         println!("{}", json);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -197,7 +200,11 @@ mod tests {
     }
 
     // Helper function to create a mock OutputMessage
-    fn create_mock_output_message(event_id: &str, action: Action, msg: Option<&str>) -> OutputMessage {
+    fn create_mock_output_message(
+        event_id: &str,
+        action: Action,
+        msg: Option<&str>,
+    ) -> OutputMessage {
         OutputMessage {
             id: event_id.to_string(),
             action,
@@ -210,7 +217,9 @@ mod tests {
         let noteguard = Noteguard::new();
         assert!(noteguard.registered_filters.contains_key("ratelimit"));
         assert!(noteguard.registered_filters.contains_key("whitelist"));
-        assert!(noteguard.registered_filters.contains_key("protected_events"));
+        assert!(noteguard
+            .registered_filters
+            .contains_key("protected_events"));
         assert!(noteguard.registered_filters.contains_key("kinds"));
     }
 
@@ -219,12 +228,15 @@ mod tests {
         let mut noteguard = Noteguard::new();
 
         // Create a mock config with one filter (RateLimit)
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             pipeline = ["ratelimit"]
 
             [filters.ratelimit]
             posts_per_minute = 3
-        "#).expect("Failed to parse config");
+        "#,
+        )
+        .expect("Failed to parse config");
 
         assert!(noteguard.load_config(&config).is_ok());
         assert_eq!(noteguard.loaded_filters.len(), 1);
@@ -235,14 +247,19 @@ mod tests {
         let mut noteguard = Noteguard::new();
 
         // Create a mock config with one filter (RateLimit)
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             pipeline = ["ratelimit"]
 
             [filters.ratelimit]
             posts_per_minute = 3
-        "#).expect("Failed to parse config");
+        "#,
+        )
+        .expect("Failed to parse config");
 
-        noteguard.load_config(&config).expect("Failed to load config");
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
 
         let input_message = create_mock_input_message("test_event_1", "new");
         let output_message = noteguard.run(input_message);
@@ -255,13 +272,18 @@ mod tests {
         let mut noteguard = Noteguard::new();
 
         // Create a mock config with one filter (ProtectedEvents) which will shadow reject the input
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             pipeline = ["protected_events"]
 
             [filters.protected_events]
-        "#).expect("Failed to parse config");
+        "#,
+        )
+        .expect("Failed to parse config");
 
-        noteguard.load_config(&config).expect("Failed to load config");
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
 
         let input_message = create_mock_input_message("test_event_3", "new");
         let output_message = noteguard.run(input_message);
@@ -274,13 +296,18 @@ mod tests {
         let mut noteguard = Noteguard::new();
 
         // Create a mock config with one filter (Whitelist) which will reject the input
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             pipeline = ["whitelist"]
             [filters.whitelist]
             pubkeys = ["something"]
-        "#).expect("Failed to parse config");
+        "#,
+        )
+        .expect("Failed to parse config");
 
-        noteguard.load_config(&config).expect("Failed to load config");
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
 
         let input_message = create_mock_input_message("test_event_2", "new");
         let output_message = noteguard.run(input_message);
@@ -308,7 +335,8 @@ mod tests {
         }
         "#;
 
-        let input_message: InputMessage = serde_json::from_str(input_json).expect("Failed to deserialize input message");
+        let input_message: InputMessage =
+            serde_json::from_str(input_json).expect("Failed to deserialize input message");
         assert_eq!(input_message.event.id, "test_event_5");
         assert_eq!(input_message.message_type, "new");
     }

@@ -1,3 +1,4 @@
+mod content;
 mod kinds;
 mod protected_events;
 mod ratelimit;
@@ -6,6 +7,7 @@ mod whitelist;
 #[cfg(feature = "forwarder")]
 mod forwarder;
 
+pub use content::Content;
 pub use kinds::Kinds;
 pub use protected_events::ProtectedEvents;
 pub use ratelimit::RateLimit;
