@@ -12,6 +12,7 @@ pub struct Tokens {
 pub struct RateLimit {
     pub posts_per_minute: i32,
     pub whitelist: Option<Vec<String>>,
+    pub message: Option<String>,
 
     #[serde(skip)]
     pub sources: HashMap<String, Tokens>,
@@ -65,7 +66,11 @@ impl NoteFilter for RateLimit {
             return OutputMessage::new(
                 msg.event.id.clone(),
                 Action::Reject,
-                Some("rate-limited: you are noting too much".to_string()),
+                Some(
+                    self.message
+                        .clone()
+                        .unwrap_or("rate-limited: you are noting too much".to_string()),
+                ),
             );
         }
 
