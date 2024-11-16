@@ -4,7 +4,6 @@ pipeline = ["protected_events", "kinds", "content", "whitelist", "ratelimit"]
 [filters.ratelimit]
 posts_per_minute = 8
 whitelist = ["127.0.0.1"]
-message = "rate-limited: you are noting too much"
 
 [filters.content]
 filters = ["https://cdn.nostr.build/i/some-spammy-or-abusive-image-image.png"]
