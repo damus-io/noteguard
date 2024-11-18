@@ -1,13 +1,13 @@
-use serde::Deserialize;
-use crate::{Note, Action, NoteFilter, InputMessage, OutputMessage};
+use crate::{Action, InputMessage, Note, NoteFilter, OutputMessage};
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc::{self, Sender, Receiver};
+use log::{debug, error, info};
+use serde::Deserialize;
+use serde_json::json;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tokio::time::{sleep, timeout, Duration};
-use serde_json::json;
-use log::{error, info, debug};
 
 #[derive(Default, Deserialize)]
 pub struct Forwarder {
@@ -21,7 +21,9 @@ pub struct Forwarder {
     channel: Option<Sender<Note>>,
 }
 
-async fn client_reconnect(relay: &str) -> WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+async fn client_reconnect(
+    relay: &str,
+) -> WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     loop {
         match connect_async(relay).await {
             Err(e) => {
