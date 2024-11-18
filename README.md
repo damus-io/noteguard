@@ -163,7 +163,7 @@ You can test your filters like so:
 ```sh
 $ cargo build
 $ <test/inputs ./target/debug/noteguard
-$ ./test/delay | ./target/debug/noteguard
+$ ./test/delayed | ./target/debug/noteguard
 ```
 
 [strfry]: https://github.com/hoytech/strfry
