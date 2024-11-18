@@ -19,6 +19,7 @@ pipeline = ["protected_events", "kinds", "whitelist", "ratelimit", "forwarder"]
 [filters.ratelimit]
 posts_per_minute = 8
 whitelist = ["127.0.0.1"]
+message = "rate-limit: you note too much"
 
 [filters.whitelist]
 pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
@@ -91,6 +92,8 @@ Settings:
 - `notes_per_minute`: the number of notes per minute which are allowed to be written per ip.
 
 - `whitelist` *optional*: a list of IP4 or IP6 addresses that are allowed to bypass the ratelimit.
+
+- `message` *optional*: the error message to return when connection is rate-limited. default is: `rate-limited: you are noting too much`
 
 ### Whitelist
 
