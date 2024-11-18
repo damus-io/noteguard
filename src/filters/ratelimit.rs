@@ -63,14 +63,15 @@ impl NoteFilter for RateLimit {
         }
 
         if entry.tokens == 0 {
+            let message = self
+                .message
+                .as_deref()
+                .unwrap_or("rate-limited: you are noting too much");
+
             return OutputMessage::new(
                 msg.event.id.clone(),
                 Action::Reject,
-                Some(
-                    self.message
-                        .clone()
-                        .unwrap_or("rate-limited: you are noting too much".to_string()),
-                ),
+                Some(message.to_owned()),
             );
         }
 
