@@ -1,4 +1,3 @@
-
 pipeline = ["protected_events", "kinds", "content", "whitelist", "ratelimit"]
 
 [filters.ratelimit]

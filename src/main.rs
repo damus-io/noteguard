@@ -1,4 +1,4 @@
-use noteguard::filters::{Content, Kinds, ProtectedEvents, RateLimit, Whitelist};
+use noteguard::filters::{Blacklist, Content, Kinds, ProtectedEvents, RateLimit, Whitelist};
 
 #[cfg(feature = "forwarder")]
 use noteguard::filters::Forwarder;
@@ -47,6 +47,7 @@ impl Noteguard {
     fn register_builtin_filters(&mut self) {
         self.register_filter::<RateLimit>();
         self.register_filter::<Whitelist>();
+        self.register_filter::<Blacklist>();
         self.register_filter::<ProtectedEvents>();
         self.register_filter::<Kinds>();
         self.register_filter::<Content>();
@@ -217,6 +218,7 @@ mod tests {
         let noteguard = Noteguard::new();
         assert!(noteguard.registered_filters.contains_key("ratelimit"));
         assert!(noteguard.registered_filters.contains_key("whitelist"));
+        assert!(noteguard.registered_filters.contains_key("blacklist"));
         assert!(noteguard
             .registered_filters
             .contains_key("protected_events"));
@@ -313,6 +315,56 @@ mod tests {
         let output_message = noteguard.run(input_message);
 
         assert_eq!(output_message.action, Action::Reject);
+    }
+
+    #[test]
+    fn test_blacklist_reject() {
+        let mut noteguard = Noteguard::new();
+
+        let config: Config = toml::from_str(
+            r#"
+            pipeline = ["blacklist"]
+            [filters.blacklist]
+            pubkeys = ["mock_pubkey"]
+        "#,
+        )
+        .expect("Failed to parse config");
+
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
+
+        let input_message = create_mock_input_message("test_event_3", "new");
+        let output_message = noteguard.run(input_message);
+
+        assert_eq!(output_message.action, Action::Reject);
+        assert_eq!(
+            output_message.msg.expect("Failed to get message"),
+            "blocked: pubkey/ip is blacklisted".to_string()
+        );
+    }
+
+    #[test]
+    fn test_blacklist_accept() {
+        let mut noteguard = Noteguard::new();
+
+        let config: Config = toml::from_str(
+            r#"
+            pipeline = ["blacklist"]
+            [filters.blacklist]
+            pubkeys = ["not_blacklisted"]
+        "#,
+        )
+        .expect("Failed to parse config");
+
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
+
+        let input_message = create_mock_input_message("test_event_4", "new");
+        let output_message = noteguard.run(input_message);
+
+        assert_eq!(output_message.action, Action::Accept);
     }
 
     #[test]
