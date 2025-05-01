@@ -1,4 +1,3 @@
-
 # noteguard
 
 A high performance note filter plugin system for [strfry]
@@ -107,6 +106,18 @@ The whitelist filter only allows notes to pass if it matches a particular pubkey
 
 Either criteria can match
 
+### Blacklist
+
+* name: `blacklist`
+
+The blacklist filter blocks notes that match any pubkey, ip, or CIDR range:
+
+- `pubkeys` *optional*: a list of hex public keys to block
+
+- `ips` *optional*: a list of IP addresses to block
+
+- `cidrs` *optional*: a list of CIDR ranges to block
+
 ### Kinds
 
 * name: `kinds`
@@ -154,7 +165,6 @@ be queued if the connection goes down (up to the `queue_size` buffer limit)
 - `relay` - the relay to forward notes to, eg: `ws://localhost:8080`
 
 - `queue_size` *optional* - size of the note queue, this is used to buffer notes if the connection goes down. Default is 1000.
-
 
 ## Testing
 

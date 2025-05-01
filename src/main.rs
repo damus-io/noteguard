@@ -177,12 +177,14 @@ fn noteguard() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noteguard::filters::{Kinds, ProtectedEvents, RateLimit, Whitelist};
     use noteguard::{Action, Note};
-    use serde_json::json;
 
     // Helper function to create a mock InputMessage
-    fn create_mock_input_message(event_id: &str, message_type: &str) -> InputMessage {
+    fn create_mock_input_message(
+        event_id: &str,
+        message_type: &str,
+        source_info: &str,
+    ) -> InputMessage {
         InputMessage {
             message_type: message_type.to_string(),
             event: Note {
@@ -196,20 +198,7 @@ mod tests {
             },
             received_at: 0,
             source_type: "mock_source".to_string(),
-            source_info: "mock_source_info".to_string(),
-        }
-    }
-
-    // Helper function to create a mock OutputMessage
-    fn create_mock_output_message(
-        event_id: &str,
-        action: Action,
-        msg: Option<&str>,
-    ) -> OutputMessage {
-        OutputMessage {
-            id: event_id.to_string(),
-            action,
-            msg: msg.map(|s| s.to_string()),
+            source_info: source_info.to_string(),
         }
     }
 
@@ -263,7 +252,7 @@ mod tests {
             .load_config(&config)
             .expect("Failed to load config");
 
-        let input_message = create_mock_input_message("test_event_1", "new");
+        let input_message = create_mock_input_message("test_event_1", "new", "mock_source_info");
         let output_message = noteguard.run(input_message);
 
         assert_eq!(output_message.action, Action::Accept);
@@ -287,7 +276,7 @@ mod tests {
             .load_config(&config)
             .expect("Failed to load config");
 
-        let input_message = create_mock_input_message("test_event_3", "new");
+        let input_message = create_mock_input_message("test_event_3", "new", "mock_source_info");
         let output_message = noteguard.run(input_message);
 
         assert_eq!(output_message.action, Action::Reject);
@@ -311,7 +300,7 @@ mod tests {
             .load_config(&config)
             .expect("Failed to load config");
 
-        let input_message = create_mock_input_message("test_event_2", "new");
+        let input_message = create_mock_input_message("test_event_2", "new", "mock_source_info");
         let output_message = noteguard.run(input_message);
 
         assert_eq!(output_message.action, Action::Reject);
@@ -334,7 +323,7 @@ mod tests {
             .load_config(&config)
             .expect("Failed to load config");
 
-        let input_message = create_mock_input_message("test_event_3", "new");
+        let input_message = create_mock_input_message("test_event_3", "new", "mock_source_info");
         let output_message = noteguard.run(input_message);
 
         assert_eq!(output_message.action, Action::Reject);
@@ -361,10 +350,47 @@ mod tests {
             .load_config(&config)
             .expect("Failed to load config");
 
-        let input_message = create_mock_input_message("test_event_4", "new");
+        let input_message = create_mock_input_message("test_event_4", "new", "mock_source_info");
         let output_message = noteguard.run(input_message);
 
         assert_eq!(output_message.action, Action::Accept);
+    }
+
+    #[test]
+    fn test_blacklist_cidr() {
+        let mut noteguard = Noteguard::new();
+
+        let config: Config = toml::from_str(
+            r#"
+            pipeline = ["blacklist"]
+            [filters.blacklist]
+            cidrs = ["127.0.0.1/24"]
+        "#,
+        )
+        .expect("Failed to parse config");
+
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
+
+        let test_cases = [
+            ("127.0.0.1", true),
+            ("127.0.0.2", true),
+            ("128.0.0.1", false),
+            ("127.1.0.1", false),
+            ("127.0.1.1", false),
+        ];
+
+        for (ip, should_reject) in test_cases.iter() {
+            let input_message = create_mock_input_message("event_id", "new", ip);
+            let output_message = noteguard.run(input_message);
+
+            if *should_reject {
+                assert_eq!(output_message.action, Action::Reject);
+            } else {
+                assert_eq!(output_message.action, Action::Accept);
+            }
+        }
     }
 
     #[test]
