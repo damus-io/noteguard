@@ -4,6 +4,34 @@ A high performance note filter plugin system for [strfry]
 
 WIP!
 
+## Architecture
+
+This repository contains two crates:
+
+- **noteguard-core**: A library crate containing the filter pipeline and all built-in filters. Can be embedded in any Nostr relay.
+- **noteguard**: A binary crate that wraps noteguard-core for use as a strfry write policy plugin.
+
+### Using noteguard-core in your relay
+
+```toml
+[dependencies]
+noteguard-core = { git = "https://github.com/damus-io/noteguard" }
+```
+
+```rust
+use noteguard_core::{Noteguard, Config, Action};
+
+let config: Config = toml::from_str(config_str)?;
+let mut guard = Noteguard::new();
+guard.load_config(&config)?;
+
+let output = guard.run(input_message);
+match output.action {
+    Action::Accept => { /* process event */ },
+    Action::Reject | Action::ShadowReject => { /* drop event */ },
+}
+```
+
 ## Usage
 
 Filters are registered and loaded from the [noteguard.toml](noteguard.toml) config.

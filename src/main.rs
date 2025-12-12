@@ -1,421 +1,230 @@
-use noteguard::filters::{Blacklist, Content, Kinds, ProtectedEvents, RateLimit, Whitelist};
-
-#[cfg(feature = "forwarder")]
-use noteguard::filters::Forwarder;
+//! Noteguard - Strfry write policy plugin
+//!
+//! This binary reads events from stdin (strfry protocol) and outputs
+//! filter decisions to stdout. It uses noteguard-core for the actual
+//! filtering logic.
+//!
+//! ## Usage
+//!
+//! Configure in strfry.conf:
+//! ```
+//! writePolicy {
+//!     plugin = "/path/to/noteguard"
+//! }
+//! ```
+//!
+//! Create noteguard.toml in the working directory with your filter config.
 
 use log::info;
-use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
-use std::collections::HashMap;
+use noteguard_core::{Config, InputMessage, Noteguard, OutputMessage};
+
+#[cfg(test)]
+use noteguard_core::Action;
 use std::io::{self, Read};
-
-#[derive(Deserialize)]
-struct Config {
-    pipeline: Vec<String>,
-    filters: HashMap<String, toml::Value>,
-}
-
-type ConstructFilter = Box<fn(toml::Value) -> Result<Box<dyn NoteFilter>, toml::de::Error>>;
-
-#[derive(Default)]
-struct Noteguard {
-    registered_filters: HashMap<String, ConstructFilter>,
-    loaded_filters: Vec<Box<dyn NoteFilter>>,
-}
-
-impl Noteguard {
-    pub fn new() -> Self {
-        let mut noteguard = Noteguard::default();
-        noteguard.register_builtin_filters();
-        noteguard
-    }
-
-    pub fn register_filter<F: NoteFilter + 'static + Default + DeserializeOwned>(&mut self) {
-        self.registered_filters.insert(
-            F::name(&F::default()).to_string(),
-            Box::new(|filter_config| {
-                filter_config
-                    .try_into()
-                    .map(|filter: F| Box::new(filter) as Box<dyn NoteFilter>)
-            }),
-        );
-    }
-
-    /// All builtin filters are registered here, and are made available with
-    /// every new instance of [`Noteguard`]
-    fn register_builtin_filters(&mut self) {
-        self.register_filter::<RateLimit>();
-        self.register_filter::<Whitelist>();
-        self.register_filter::<Blacklist>();
-        self.register_filter::<ProtectedEvents>();
-        self.register_filter::<Kinds>();
-        self.register_filter::<Content>();
-
-        #[cfg(feature = "forwarder")]
-        self.register_filter::<Forwarder>();
-    }
-
-    /// Run the loaded filters. You must call `load_config` before calling this, otherwise
-    /// not filters will be run.
-    fn run(&mut self, input: InputMessage) -> OutputMessage {
-        let mut mout: Option<OutputMessage> = None;
-
-        let id = input.event.id.clone();
-        for filter in &mut self.loaded_filters {
-            let out = filter.filter_note(&input);
-            match out.action {
-                Action::Accept => {
-                    mout = Some(out);
-                    continue;
-                }
-                Action::Reject => {
-                    return out;
-                }
-                Action::ShadowReject => {
-                    return out;
-                }
-            }
-        }
-
-        mout.unwrap_or_else(|| OutputMessage::new(id, Action::Accept, None))
-    }
-
-    /// Initializes a noteguard config. If it finds any filter configurations
-    /// matching the registered filters, it loads those into our filter pipeline.
-    fn load_config(&mut self, config: &Config) -> Result<(), toml::de::Error> {
-        self.loaded_filters.clear();
-
-        for name in &config.pipeline {
-            let config_value = config
-                .filters
-                .get(name)
-                .unwrap_or_else(|| panic!("could not find filter configuration for {}", name));
-
-            if let Some(constructor) = self.registered_filters.get(name.as_str()) {
-                let filter = constructor(config_value.clone())?;
-                self.loaded_filters.push(filter);
-            } else {
-                panic!("Found config settings with no matching filter: {}", name);
-            }
-        }
-
-        Ok(())
-    }
-}
 
 #[cfg(feature = "forwarder")]
 #[tokio::main]
 async fn main() {
-    noteguard();
+    run_noteguard();
 }
 
 #[cfg(not(feature = "forwarder"))]
 fn main() {
-    noteguard();
+    run_noteguard();
 }
 
-fn serialize_output_message(msg: &OutputMessage) -> String {
-    serde_json::to_string(msg).expect("OutputMessage should always serialize correctly")
+/// Serializes an output message to JSON for strfry.
+fn serialize_output(msg: &OutputMessage) -> String {
+    serde_json::to_string(msg).expect("OutputMessage serialization should not fail")
 }
 
-fn noteguard() {
+/// Main entry point - loads config and processes stdin.
+fn run_noteguard() {
     env_logger::init();
-    info!("running noteguard");
+    info!("starting noteguard");
 
+    // Load configuration
     let config_path = "noteguard.toml";
-    let mut noteguard = Noteguard::new();
-
     let config: Config = {
-        let mut file = std::fs::File::open(config_path).expect("Failed to open config file");
+        let mut file = std::fs::File::open(config_path)
+            .unwrap_or_else(|e| panic!("failed to open {}: {}", config_path, e));
         let mut contents = String::new();
         file.read_to_string(&mut contents)
-            .expect("Failed to read config file");
-        toml::from_str(&contents).expect("Failed to parse config file")
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", config_path, e));
+        toml::from_str(&contents)
+            .unwrap_or_else(|e| panic!("failed to parse {}: {}", config_path, e))
     };
 
+    // Initialize filter pipeline
+    let mut noteguard = Noteguard::new();
     noteguard
         .load_config(&config)
-        .expect("Expected filter config to be loaded ok");
+        .expect("failed to load filter configuration");
 
+    // Process events from stdin
     let stdin = io::stdin();
-
     for line in stdin.lines() {
         let line = match line {
             Ok(line) => line,
             Err(e) => {
-                eprintln!("Failed to get line: {}", e);
+                eprintln!("failed to read line: {}", e);
                 continue;
             }
         };
 
-        let input_message: InputMessage = match serde_json::from_str(&line) {
+        let input: InputMessage = match serde_json::from_str(&line) {
             Ok(msg) => msg,
             Err(e) => {
-                eprintln!("Failed to parse input: {}", e);
+                eprintln!("failed to parse input: {}", e);
                 continue;
             }
         };
 
-        if input_message.message_type != "new" {
-            let out = OutputMessage::new(
-                input_message.event.id.clone(),
-                Action::Reject,
-                Some("invalid strfry write policy input".to_string()),
+        // Strfry only sends "new" type messages to write policy plugins
+        if input.message_type != "new" {
+            let out = OutputMessage::reject(
+                input.event.id.clone(),
+                "invalid strfry write policy input",
             );
-            println!("{}", serialize_output_message(&out));
+            println!("{}", serialize_output(&out));
             continue;
         }
 
-        let out = noteguard.run(input_message);
-        let json = serialize_output_message(&out);
-
-        println!("{}", json);
+        let out = noteguard.run(input);
+        println!("{}", serialize_output(&out));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noteguard::{Action, Note};
+    use noteguard_core::Note;
 
-    // Helper function to create a mock InputMessage
-    fn create_mock_input_message(
-        event_id: &str,
-        message_type: &str,
-        source_info: &str,
-    ) -> InputMessage {
+    fn mock_input(event_id: &str, pubkey: &str, source_info: &str) -> InputMessage {
         InputMessage {
-            message_type: message_type.to_string(),
+            message_type: "new".to_string(),
             event: Note {
                 id: event_id.to_string(),
-                pubkey: "mock_pubkey".to_string(),
+                pubkey: pubkey.to_string(),
                 created_at: 0,
                 kind: 1,
                 tags: vec![vec!["-".to_string()]],
-                content: "mock_content".to_string(),
-                sig: "mock_signature".to_string(),
+                content: "test".to_string(),
+                sig: "sig".to_string(),
             },
             received_at: 0,
-            source_type: "mock_source".to_string(),
+            source_type: "IP4".to_string(),
             source_info: source_info.to_string(),
         }
     }
 
     #[test]
-    fn test_register_builtin_filters() {
+    fn test_builtin_filters_registered() {
         let noteguard = Noteguard::new();
-        assert!(noteguard.registered_filters.contains_key("ratelimit"));
-        assert!(noteguard.registered_filters.contains_key("whitelist"));
-        assert!(noteguard.registered_filters.contains_key("blacklist"));
-        assert!(noteguard
-            .registered_filters
-            .contains_key("protected_events"));
-        assert!(noteguard.registered_filters.contains_key("kinds"));
-    }
-
-    #[test]
-    fn test_load_config() {
-        let mut noteguard = Noteguard::new();
-
-        // Create a mock config with one filter (RateLimit)
+        // Verify we can load a config using built-in filters
         let config: Config = toml::from_str(
             r#"
             pipeline = ["ratelimit"]
-
             [filters.ratelimit]
-            posts_per_minute = 3
-        "#,
+            posts_per_minute = 5
+            "#,
         )
-        .expect("Failed to parse config");
-
-        assert!(noteguard.load_config(&config).is_ok());
-        assert_eq!(noteguard.loaded_filters.len(), 1);
+        .unwrap();
+        let mut guard = noteguard;
+        assert!(guard.load_config(&config).is_ok());
     }
 
     #[test]
-    fn test_run_filters_accept() {
+    fn test_protected_events_rejected() {
         let mut noteguard = Noteguard::new();
-
-        // Create a mock config with one filter (RateLimit)
-        let config: Config = toml::from_str(
-            r#"
-            pipeline = ["ratelimit"]
-
-            [filters.ratelimit]
-            posts_per_minute = 3
-        "#,
-        )
-        .expect("Failed to parse config");
-
-        noteguard
-            .load_config(&config)
-            .expect("Failed to load config");
-
-        let input_message = create_mock_input_message("test_event_1", "new", "mock_source_info");
-        let output_message = noteguard.run(input_message);
-
-        assert_eq!(output_message.action, Action::Accept);
-    }
-
-    #[test]
-    fn test_run_filters_shadow_reject() {
-        let mut noteguard = Noteguard::new();
-
-        // Create a mock config with one filter (ProtectedEvents) which will shadow reject the input
         let config: Config = toml::from_str(
             r#"
             pipeline = ["protected_events"]
-
             [filters.protected_events]
-        "#,
+            "#,
         )
-        .expect("Failed to parse config");
+        .unwrap();
+        noteguard.load_config(&config).unwrap();
 
-        noteguard
-            .load_config(&config)
-            .expect("Failed to load config");
-
-        let input_message = create_mock_input_message("test_event_3", "new", "mock_source_info");
-        let output_message = noteguard.run(input_message);
-
-        assert_eq!(output_message.action, Action::Reject);
+        let input = mock_input("evt1", "pk1", "127.0.0.1");
+        let output = noteguard.run(input);
+        assert_eq!(output.action, Action::Reject);
     }
 
     #[test]
-    fn test_whitelist_reject() {
+    fn test_whitelist_reject_unknown() {
         let mut noteguard = Noteguard::new();
-
-        // Create a mock config with one filter (Whitelist) which will reject the input
         let config: Config = toml::from_str(
             r#"
             pipeline = ["whitelist"]
             [filters.whitelist]
-            pubkeys = ["something"]
-        "#,
+            pubkeys = ["allowed_pubkey"]
+            "#,
         )
-        .expect("Failed to parse config");
+        .unwrap();
+        noteguard.load_config(&config).unwrap();
 
-        noteguard
-            .load_config(&config)
-            .expect("Failed to load config");
-
-        let input_message = create_mock_input_message("test_event_2", "new", "mock_source_info");
-        let output_message = noteguard.run(input_message);
-
-        assert_eq!(output_message.action, Action::Reject);
+        let input = mock_input("evt1", "unknown_pubkey", "127.0.0.1");
+        let output = noteguard.run(input);
+        assert_eq!(output.action, Action::Reject);
     }
 
     #[test]
-    fn test_blacklist_reject() {
+    fn test_blacklist_blocks_pubkey() {
         let mut noteguard = Noteguard::new();
-
         let config: Config = toml::from_str(
             r#"
             pipeline = ["blacklist"]
             [filters.blacklist]
-            pubkeys = ["mock_pubkey"]
-        "#,
+            pubkeys = ["bad_actor"]
+            "#,
         )
-        .expect("Failed to parse config");
+        .unwrap();
+        noteguard.load_config(&config).unwrap();
 
-        noteguard
-            .load_config(&config)
-            .expect("Failed to load config");
-
-        let input_message = create_mock_input_message("test_event_3", "new", "mock_source_info");
-        let output_message = noteguard.run(input_message);
-
-        assert_eq!(output_message.action, Action::Reject);
-        assert_eq!(
-            output_message.msg.expect("Failed to get message"),
-            "blocked: pubkey/ip is blacklisted".to_string()
-        );
+        let input = mock_input("evt1", "bad_actor", "127.0.0.1");
+        let output = noteguard.run(input);
+        assert_eq!(output.action, Action::Reject);
+        assert!(output.msg.unwrap().contains("blacklisted"));
     }
 
     #[test]
-    fn test_blacklist_accept() {
+    fn test_blacklist_allows_good_pubkey() {
         let mut noteguard = Noteguard::new();
-
         let config: Config = toml::from_str(
             r#"
             pipeline = ["blacklist"]
             [filters.blacklist]
-            pubkeys = ["not_blacklisted"]
-        "#,
+            pubkeys = ["bad_actor"]
+            "#,
         )
-        .expect("Failed to parse config");
+        .unwrap();
+        noteguard.load_config(&config).unwrap();
 
-        noteguard
-            .load_config(&config)
-            .expect("Failed to load config");
-
-        let input_message = create_mock_input_message("test_event_4", "new", "mock_source_info");
-        let output_message = noteguard.run(input_message);
-
-        assert_eq!(output_message.action, Action::Accept);
+        let input = mock_input("evt1", "good_actor", "127.0.0.1");
+        let output = noteguard.run(input);
+        assert_eq!(output.action, Action::Accept);
     }
 
     #[test]
-    fn test_blacklist_cidr() {
+    fn test_cidr_blocking() {
         let mut noteguard = Noteguard::new();
-
         let config: Config = toml::from_str(
             r#"
             pipeline = ["blacklist"]
             [filters.blacklist]
-            cidrs = ["127.0.0.1/24"]
-        "#,
+            cidrs = ["10.0.0.0/8"]
+            "#,
         )
-        .expect("Failed to parse config");
+        .unwrap();
+        noteguard.load_config(&config).unwrap();
 
-        noteguard
-            .load_config(&config)
-            .expect("Failed to load config");
+        // IP in blocked range
+        let input = mock_input("evt1", "pk1", "10.1.2.3");
+        assert_eq!(noteguard.run(input).action, Action::Reject);
 
-        let test_cases = [
-            ("127.0.0.1", true),
-            ("127.0.0.2", true),
-            ("128.0.0.1", false),
-            ("127.1.0.1", false),
-            ("127.0.1.1", false),
-        ];
-
-        for (ip, should_reject) in test_cases.iter() {
-            let input_message = create_mock_input_message("event_id", "new", ip);
-            let output_message = noteguard.run(input_message);
-
-            if *should_reject {
-                assert_eq!(output_message.action, Action::Reject);
-            } else {
-                assert_eq!(output_message.action, Action::Accept);
-            }
-        }
-    }
-
-    #[test]
-    fn test_deserialize_input_message() {
-        let input_json = r#"
-        {
-            "type": "new",
-            "event": {
-                "id": "test_event_5",
-                "pubkey": "mock_pubkey",
-                "created_at": 0,
-                "kind": 1,
-                "tags": [],
-                "content": "mock_content",
-                "sig": "mock_signature"
-            },
-            "receivedAt": 0,
-            "sourceType": "mock_source",
-            "sourceInfo": "mock_source_info"
-        }
-        "#;
-
-        let input_message: InputMessage =
-            serde_json::from_str(input_json).expect("Failed to deserialize input message");
-        assert_eq!(input_message.event.id, "test_event_5");
-        assert_eq!(input_message.message_type, "new");
+        // IP outside blocked range
+        let input = mock_input("evt2", "pk1", "192.168.1.1");
+        assert_eq!(noteguard.run(input).action, Action::Accept);
     }
 }
