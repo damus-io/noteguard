@@ -1,3 +1,8 @@
+//! Built-in filter implementations.
+//!
+//! All filters in this module are automatically registered when creating
+//! a new `Noteguard` instance. Custom filters can be registered separately.
+
 mod blacklist;
 mod content;
 mod kinds;

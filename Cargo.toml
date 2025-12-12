@@ -2,19 +2,35 @@
 name = "noteguard"
 version = "0.1.0"
 edition = "2021"
+description = "High-performance Nostr event filter library and strfry write policy plugin"
+
+# Build both library and binary from the same crate
+[lib]
+name = "noteguard"
+path = "src/lib.rs"
+
+[[bin]]
+name = "noteguard"
+path = "src/main.rs"
 
 [features]
+# The forwarder filter requires async runtime support
 forwarder = ["tokio-tungstenite", "tokio", "futures-util"]
 
 [dependencies]
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.5"
+
+# IP/CIDR parsing for blacklist filter
 ipnetwork = "0.20.0"
 
-# forwarder deps
+# Logging
+log = "0.4.22"
+env_logger = "0.11.3"
+
+# Forwarder filter dependencies (optional)
 tokio-tungstenite = { version = "0.23.1", optional = true, features = ["native-tls"] }
 tokio = { version = "1.38.0", features = ["macros", "time", "sync", "rt-multi-thread"], optional = true }
 futures-util = { version = "0.3.30", optional = true }
-log = "0.4.22"
-env_logger = "0.11.3"
