@@ -439,18 +439,6 @@ name = "noteguard"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "log",
- "noteguard-core",
- "serde",
- "serde_json",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "noteguard-core"
-version = "0.1.0"
-dependencies = [
  "futures-util",
  "ipnetwork",
  "log",

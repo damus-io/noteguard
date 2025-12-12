@@ -1,8 +1,7 @@
 //! Noteguard - Strfry write policy plugin
 //!
 //! This binary reads events from stdin (strfry protocol) and outputs
-//! filter decisions to stdout. It uses noteguard-core for the actual
-//! filtering logic.
+//! filter decisions to stdout.
 //!
 //! ## Usage
 //!
@@ -16,10 +15,10 @@
 //! Create noteguard.toml in the working directory with your filter config.
 
 use log::info;
-use noteguard_core::{Config, InputMessage, Noteguard, OutputMessage};
+use noteguard::{Config, InputMessage, Noteguard, OutputMessage};
 
 #[cfg(test)]
-use noteguard_core::Action;
+use noteguard::Action;
 use std::io::{self, Read};
 
 #[cfg(feature = "forwarder")]
@@ -98,7 +97,7 @@ fn run_noteguard() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noteguard_core::Note;
+    use noteguard::Note;
 
     fn mock_input(event_id: &str, pubkey: &str, source_info: &str) -> InputMessage {
         InputMessage {

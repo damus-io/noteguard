@@ -36,7 +36,7 @@ pub struct Note {
 /// ## Implementing a Custom Filter
 ///
 /// ```ignore
-/// use noteguard_core::{NoteFilter, InputMessage, OutputMessage, Action};
+/// use noteguard::{NoteFilter, InputMessage, OutputMessage, Action};
 /// use serde::Deserialize;
 ///
 /// #[derive(Deserialize, Default)]

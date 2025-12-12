@@ -1,7 +1,10 @@
-//! # noteguard-core
+//! # noteguard
 //!
-//! Core filtering library for Nostr events. This crate provides a configurable
-//! filter pipeline that can be embedded in any Nostr relay or proxy.
+//! A high-performance Nostr event filter library and strfry write policy plugin.
+//!
+//! This crate provides a configurable filter pipeline that can be:
+//! - Embedded in any Nostr relay as a library
+//! - Used as a standalone strfry write policy plugin
 //!
 //! ## Architecture
 //!
@@ -11,10 +14,10 @@
 //! 3. Filters return `Accept`, `Reject`, or `ShadowReject`
 //! 4. First rejection terminates the pipeline; accepts continue to next filter
 //!
-//! ## Usage
+//! ## Library Usage
 //!
 //! ```ignore
-//! use noteguard_core::{Noteguard, Config};
+//! use noteguard::{Noteguard, Config, Action};
 //!
 //! let config: Config = toml::from_str(config_str)?;
 //! let mut guard = Noteguard::new();
