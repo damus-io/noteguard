@@ -1,4 +1,6 @@
-use noteguard::filters::{Blacklist, Content, Kinds, ProtectedEvents, RateLimit, Whitelist};
+use noteguard::filters::{
+    Blacklist, Content, Kinds, Nip05Whitelist, ProtectedEvents, RateLimit, Whitelist,
+};
 
 #[cfg(feature = "forwarder")]
 use noteguard::filters::Forwarder;
@@ -51,6 +53,7 @@ impl Noteguard {
         self.register_filter::<ProtectedEvents>();
         self.register_filter::<Kinds>();
         self.register_filter::<Content>();
+        self.register_filter::<Nip05Whitelist>();
 
         #[cfg(feature = "forwarder")]
         self.register_filter::<Forwarder>();

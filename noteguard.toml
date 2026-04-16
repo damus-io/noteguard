@@ -22,3 +22,8 @@ kinds = [30065, 1064, 34550, 4550]
 4550 = "blocked: please use a dedicated relay for moderated communities"
 
 [filters.protected_events]
+
+# [filters.nip05_whitelist]
+# source = "https://example.com/.well-known/nostr.json"
+# reload_interval_secs = 60
+# message = "blocked: not a verified member"
