@@ -1,4 +1,7 @@
 pipeline = ["protected_events", "kinds", "content", "whitelist", "ratelimit"]
+# To enable the NIP-05 whitelist filter, add "nip05_whitelist" to the pipeline
+# above (and uncomment the [filters.nip05_whitelist] block below). For example:
+# pipeline = ["protected_events", "nip05_whitelist", "kinds", "content", "whitelist", "ratelimit"]
 
 [filters.ratelimit]
 posts_per_minute = 8
@@ -22,3 +25,8 @@ kinds = [30065, 1064, 34550, 4550]
 4550 = "blocked: please use a dedicated relay for moderated communities"
 
 [filters.protected_events]
+
+# [filters.nip05_whitelist]
+# source = "https://example.com/.well-known/nostr.json"
+# reload_interval_secs = 60
+# message = "blocked: not a verified member"
