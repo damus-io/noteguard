@@ -2,9 +2,19 @@ use crate::{Action, InputMessage, NoteFilter, OutputMessage};
 use log::{error, info};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
+
+// Upper bound on the size of a NIP-05 JSON payload (local or remote) we will
+// read into memory. 10 MiB is far larger than any realistic nostr.json but
+// small enough to prevent OOM from a hostile or misconfigured source.
+const MAX_BYTES: u64 = 10 * 1024 * 1024;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MIN_RELOAD_INTERVAL_SECS: u64 = 5;
+const DEFAULT_RELOAD_INTERVAL_SECS: u64 = 60;
 
 #[derive(Deserialize, Default)]
 pub struct Nip05Whitelist {
@@ -25,16 +35,45 @@ fn is_url(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
 }
 
+fn read_capped<R: Read>(mut reader: R, source: &str, kind: &str) -> Result<String, String> {
+    let mut buf = Vec::new();
+    // Read one byte past the cap so we can detect overflow without silently
+    // truncating the payload and feeding a corrupt JSON fragment to the parser.
+    reader
+        .by_ref()
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("failed to read {} {}: {}", kind, source, e))?;
+
+    if buf.len() as u64 > MAX_BYTES {
+        return Err(format!(
+            "{} {} exceeded maximum size of {} bytes",
+            kind, source, MAX_BYTES
+        ));
+    }
+
+    String::from_utf8(buf)
+        .map_err(|e| format!("failed to read {} {}: {}", kind, source, e))
+}
+
 fn fetch_pubkeys(source: &str) -> Result<HashSet<String>, String> {
     let body = if is_url(source) {
-        ureq::get(source)
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(HTTP_CONNECT_TIMEOUT)
+            .timeout_read(HTTP_READ_TIMEOUT)
+            .build();
+
+        let reader = agent
+            .get(source)
             .call()
             .map_err(|e| format!("HTTP request failed for {}: {}", source, e))?
-            .into_string()
-            .map_err(|e| format!("failed to read response body from {}: {}", source, e))?
+            .into_reader();
+
+        read_capped(reader, source, "response body from")?
     } else {
-        std::fs::read_to_string(source)
-            .map_err(|e| format!("failed to read file {}: {}", source, e))?
+        let file = std::fs::File::open(source)
+            .map_err(|e| format!("failed to read file {}: {}", source, e))?;
+        read_capped(file, source, "file")?
     };
 
     let nip05: Nip05Json =
@@ -85,7 +124,17 @@ impl Nip05Whitelist {
         let pubkeys = Arc::new(RwLock::new(initial_set));
         self.pubkeys = Some(pubkeys.clone());
 
-        let interval = Duration::from_secs(self.reload_interval_secs.unwrap_or(60));
+        let configured = self
+            .reload_interval_secs
+            .unwrap_or(DEFAULT_RELOAD_INTERVAL_SECS);
+        let clamped = configured.max(MIN_RELOAD_INTERVAL_SECS);
+        if clamped != configured {
+            error!(
+                "nip05_whitelist: reload_interval_secs={} is below minimum {}, clamping",
+                configured, MIN_RELOAD_INTERVAL_SECS
+            );
+        }
+        let interval = Duration::from_secs(clamped);
         spawn_reload_thread(self.source.clone(), interval, pubkeys);
     }
 }
