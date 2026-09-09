@@ -7,6 +7,8 @@ edition = "2021"
 forwarder = ["tokio-tungstenite", "tokio", "futures-util"]
 # nscript: run user-submitted WASM note filters (Phase 0 spike)
 nscript = ["wasmtime"]
+# cloudflare: escalate BanTracker IP-bans to a Cloudflare WAF IP list (edge block)
+cloudflare = ["ureq"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -24,3 +26,6 @@ env_logger = "0.11.3"
 
 # nscript deps
 wasmtime = { version = "48", optional = true, default-features = false, features = ["cranelift", "runtime", "std"] }
+
+# cloudflare deps — blocking HTTP client for the edge-ban worker
+ureq = { version = "2", optional = true, features = ["json"] }

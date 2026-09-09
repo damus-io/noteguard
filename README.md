@@ -100,6 +100,30 @@ Settings:
 
 - `ban_message` *optional*: the error message returned to a banned IP. Default is: `banned: too many rate-limit violations, try again later`
 
+### Cloudflare edge-banning
+
+*Requires the `cloudflare` build feature (`cargo build --features cloudflare`).*
+
+Any IP-ban — from `ratelimit`'s consecutive streak **or** `content`'s cumulative one — can be escalated to the edge. When enabled, a banned IP is added to a Cloudflare WAF IP list for the ban's duration and removed when it expires, so offenders are dropped by Cloudflare before they ever reach the relay. It is a single shared worker, so one configuration covers every filter that bans.
+
+One-time Cloudflare setup (noteguard does **not** do this for you): create an IP list and a WAF custom rule that blocks it, e.g. expression `(ip.src in $your_list)` with action *block*. noteguard only manages the list's membership.
+
+Configure it with a top-level `[cloudflare]` table:
+
+```toml
+[cloudflare]
+account_id = "<cloudflare account id>"
+list_id = "<ip list id>"
+# comment = "noteguard auto-ban"   # optional; stamped on each list item
+# timeout_secs = 10                # optional; per-request HTTP timeout
+# api_base = "..."                 # optional; override the API base URL
+```
+
+- The API token is read from the **`CLOUDFLARE_API_TOKEN`** environment variable (needs *Account → Account Filter Lists → Edit*), never from the config file. If the section is present but the env var is unset, edge-banning is logged as disabled and the relay keeps running with relay-local bans only.
+- Omit the `[cloudflare]` section (or build without the feature) to disable edge-banning entirely.
+
+Caveats: strfry runs one plugin process per ingester thread, each with its own banner — Cloudflare de-duplicates list items by value, so redundant adds are harmless. If a process dies mid-ban its pending removal is lost and the IP lingers in the list until a later run (or a human) clears it; the per-item `comment` tags noteguard's entries so they are easy to find.
+
 ### Whitelist
 
 * name: `whitelist`

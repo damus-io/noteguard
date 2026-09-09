@@ -6,6 +6,9 @@ pub mod readfilters;
 pub mod readmsg;
 pub mod readpolicy;
 
+#[cfg(feature = "cloudflare")]
+pub mod cloudflare;
+
 #[cfg(feature = "nscript")]
 pub mod nscript;
 

@@ -17,6 +17,13 @@ use std::io;
 struct Config {
     pipeline: Vec<String>,
     filters: HashMap<String, toml::Value>,
+
+    /// Shared Cloudflare edge-ban config, consumed once at startup to arm the
+    /// process-global banner every `BanTracker` escalates to. Ignored when the
+    /// `cloudflare` feature is not built.
+    #[cfg(feature = "cloudflare")]
+    #[serde(default)]
+    cloudflare: Option<noteguard::cloudflare::CloudflareConfig>,
 }
 
 type ConstructFilter = Box<fn(toml::Value) -> Result<Box<dyn NoteFilter>, toml::de::Error>>;
@@ -151,6 +158,13 @@ fn noteguard() {
     noteguard
         .load_config(&config)
         .expect("Expected filter config to be loaded ok");
+
+    // Arm the shared Cloudflare edge-banner before processing notes, so the very
+    // first ban can escalate to the edge.
+    #[cfg(feature = "cloudflare")]
+    if let Some(cf) = config.cloudflare.clone() {
+        noteguard::cloudflare::init(cf);
+    }
 
     let stdin = io::stdin();
 

@@ -106,6 +106,12 @@ impl BanTracker {
                 .ban_duration_secs
                 .unwrap_or(DEFAULT_BAN_DURATION_SECS);
             state.banned_until = Some(now + Duration::from_secs(secs));
+            // Escalate to the edge if a Cloudflare banner is configured. This is
+            // the single choke point every write-path filter's ban flows through,
+            // so both ratelimit and content get edge-banning for free. No-op
+            // unless the `cloudflare` feature is built and `[cloudflare]` is set.
+            #[cfg(feature = "cloudflare")]
+            crate::cloudflare::edge_ban(ip, Duration::from_secs(secs));
             true
         } else {
             false

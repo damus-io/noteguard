@@ -30,6 +30,28 @@ filters = [
 ban_after = 5
 ban_duration_secs = 3600 # one hour
 
+# ---------------------------------------------------------------------------
+# Cloudflare edge-banning (optional; requires the `cloudflare` build feature)
+#
+# When present, every BanTracker ban — from `filters.ratelimit` OR
+# `filters.content` — is *also* pushed to a Cloudflare WAF IP list for the ban's
+# duration, then removed when it expires. A blocked IP is then dropped at
+# Cloudflare's edge before it ever reaches the relay.
+#
+# One-time setup on your side: create an IP list and a WAF custom rule that
+# blocks it, e.g. expression `(ip.src in $<your_list>)` with action "block".
+# noteguard only manages the list's membership, not the rule.
+#
+# The API token is read from the CLOUDFLARE_API_TOKEN environment variable (it
+# needs Account Filter Lists: Edit), never from this file. Omit this whole
+# section to disable edge-banning; bans then stay relay-local as before.
+# [cloudflare]
+# account_id = "<cloudflare account id>"
+# list_id = "<ip list id>"
+# comment = "noteguard auto-ban"   # optional; stamped on each list item
+# timeout_secs = 10                # optional; per-request HTTP timeout
+# api_base = "https://api.cloudflare.com/client/v4"  # optional override
+
 [filters.whitelist]
 pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
 ips = ["127.0.0.1"]
