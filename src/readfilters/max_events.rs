@@ -29,11 +29,30 @@ impl ReadFilter for MaxEventsPerConn {
 
     fn req_open(
         &mut self,
-        _ctx: &ConnContext,
+        ctx: &ConnContext,
         _filter: Option<&serde_json::Value>,
     ) -> OpenDecision {
-        // A configured cap always needs to see events, so strfry must keep
-        // sending `req` batches for the counter to bound delivery.
+        // If this connection has already been delivered its lifetime cap, reject
+        // the new subscription outright so the client gets a NIP-01 CLOSED
+        // instead of an admitted sub that would silently deliver nothing.
+        //
+        // No retry_ms: the cap is a per-connId LIFETIME limit with no refill, so
+        // retrying on the SAME connId is futile — a reconnect gets a fresh connId
+        // (and a fresh counter), so the client's own reconnect *is* the retry. A
+        // millisecond hint would be a lie here.
+        let already = *self.delivered.get(&ctx.conn_id).unwrap_or(&0);
+        if already >= self.max {
+            return OpenDecision::reject(
+                Some(format!(
+                    "per-connection event cap reached ({} events); reconnect for a fresh budget",
+                    self.max
+                )),
+                None,
+            );
+        }
+
+        // Otherwise a configured cap always needs to see events, so strfry must
+        // keep sending `req` batches for the counter to bound delivery.
         OpenDecision::needs_events()
     }
 

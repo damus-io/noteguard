@@ -634,6 +634,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bandwidth_rejects_at_open_when_drained() {
+        // Budget for exactly one event. The first sub drains the IP's bucket; a
+        // fresh REQ from the SAME IP is then rejected OUTRIGHT at reqOpen with a
+        // CLOSED (msg + retryMs) — real backpressure — rather than a silent
+        // empty feed. The not-yet-drained accept case is covered by
+        // `bandwidth_disables_passthrough`.
+        let size = unparsed_note("a", 1, "").size() as u64;
+        let mut engine = engine(&format!(
+            r#"
+            pipeline = ["read_bandwidth"]
+            [filters.read_bandwidth]
+            bytes_per_minute = {}
+        "#,
+            size + 1
+        ));
+
+        // Fresh IP: admitted (a full bucket affords the nominal event).
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s","ip":"1.2.3.4"}"#)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&open).unwrap();
+        assert_eq!(v["action"], "accept");
+
+        // Spend the whole budget on the one affordable event.
+        assert_eq!(engine.filter_batch(1, "s", &events(&["a"])), vec!["a"]);
+
+        // Reconnect from the SAME IP (bucket keyed by IP, never evicted): now
+        // drained, so reqOpen is rejected with a CLOSED + retry hint.
+        engine.handle(r#"{"type":"connClose","connId":1}"#);
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":9,"connId":2,"subId":"s2","ip":"1.2.3.4"}"#)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&open).unwrap();
+        assert_eq!(v["reqId"], 9);
+        assert_eq!(v["action"], "reject");
+        assert!(v["msg"].as_str().unwrap().contains("bandwidth"));
+        assert!(v["retryMs"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn count_rejects_at_open_when_cap_reached() {
+        // Once a connection has been delivered its lifetime cap, a new sub on the
+        // same connId is rejected at reqOpen (CLOSED, no retryMs — the cap has no
+        // refill on this connId, so a same-connId retry is futile). The
+        // not-yet-capped accept case is covered by
+        // `count_throttle_disables_passthrough`.
+        let mut engine = engine(
+            r#"
+            pipeline = ["max_events_per_conn"]
+            [filters.max_events_per_conn]
+            max = 1
+        "#,
+        );
+        // Fresh conn: admitted.
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s"}"#)
+            .unwrap();
+        assert_eq!(open, r#"{"reqId":0,"action":"accept"}"#);
+
+        // Deliver the one allowed event to reach the cap.
+        assert_eq!(engine.filter_batch(1, "s", &events(&["a"])), vec!["a"]);
+
+        // A new sub on the SAME connId is now rejected — message, NO retryMs.
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":3,"connId":1,"subId":"s2"}"#)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&open).unwrap();
+        assert_eq!(v["action"], "reject");
+        assert!(v["msg"].as_str().unwrap().contains("cap reached"));
+        assert!(v["retryMs"].is_null());
+
+        // A reconnect (fresh connId) resets the counter and is admitted again.
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":4,"connId":2,"subId":"s"}"#)
+            .unwrap();
+        assert_eq!(open, r#"{"reqId":4,"action":"accept"}"#);
+    }
+
     /// A test-only filter that withholds (`Skip`) any event whose id starts with
     /// `x`, and otherwise delivers. Used to exercise cross-filter composition
     /// (an earlier stateful filter must not charge an event a later filter

@@ -16,6 +16,31 @@ struct ByteBucket {
     last_refill: Instant,
 }
 
+impl ByteBucket {
+    /// Refill toward `cap` by the elapsed fraction of a minute (same shape as
+    /// `ratelimit.rs`), clamped to one minute's worth and capped at `cap`.
+    fn refill(&mut self, cap: f64) {
+        let now = Instant::now();
+        let mut elapsed = now.duration_since(self.last_refill);
+        let min = Duration::from_secs(60);
+        if elapsed > min {
+            elapsed = min;
+        }
+        let refill = (elapsed.as_secs_f64() / 60.0) * cap;
+        self.tokens = (self.tokens + refill).min(cap);
+        self.last_refill = now;
+    }
+}
+
+/// Nominal event size (bytes) assumed at `reqOpen`, where the next event's real
+/// wire size is unknown. Used both to decide whether the IP's bucket can afford
+/// "roughly one event" (and so whether to reject the subscription outright) and
+/// to estimate the retry hint. A middling nostr event is a few hundred bytes;
+/// the real per-event charge on `req` still meters each event's exact size. The
+/// threshold is clamped to the bucket capacity below, so a fresh (full) bucket
+/// always affords it and only a drained IP trips the reject.
+const NOMINAL_EVENT_SIZE: u64 = 512;
+
 /// Read-bandwidth throttle: cap the *bytes* of events delivered per minute,
 /// keyed per client IP so reconnecting with a fresh `connId` from the same IP
 /// does not reset the budget. The read-side analogue of the write-side
@@ -92,17 +117,45 @@ impl ReadFilter for ReadBandwidth {
         // single `connId` lookup with no allocation, no whitelist rescan, and
         // (against an old strfry) one missing-IP warning rather than a flood.
         let key = self.resolve_key(ctx);
+        let cap = self.bytes_per_minute as f64;
+
+        // Peek the IP's (refilled) bucket to decide admission before serving a
+        // single event. An already-drained IP is rejected outright so the client
+        // gets a NIP-01 CLOSED + retry hint (real backpressure) instead of a
+        // silent empty/truncated feed — the reconnect/churn abuse case. While
+        // there is still budget we admit and meter per-event on `req` as before.
+        let mut reject_retry_ms: Option<u64> = None;
         if let Some(key) = &key {
             // Create the bucket full on first sight of this IP — but never
             // reset an existing one, which must survive a reconnect.
-            let cap = self.bytes_per_minute as f64;
-            self.buckets.entry(key.clone()).or_insert(ByteBucket {
+            let bucket = self.buckets.entry(key.clone()).or_insert(ByteBucket {
                 tokens: cap,
                 last_refill: Instant::now(),
             });
+            bucket.refill(cap);
+            // Nominal event size clamped to capacity: a fresh (full) bucket
+            // always affords it, so only a drained IP trips the reject.
+            let nominal = (NOMINAL_EVENT_SIZE as f64).min(cap);
+            if bucket.tokens < nominal {
+                // retry_ms: time to refill one nominal event at
+                // bytes_per_minute. An estimate — the next event's real size is
+                // unknown at reqOpen (documented on NOMINAL_EVENT_SIZE).
+                reject_retry_ms = Some(((nominal / cap) * 60_000.0).ceil() as u64);
+            }
         }
+
         let exempt = key.is_none();
         self.conn_keys.insert(ctx.conn_id, key);
+
+        if let Some(retry_ms) = reject_retry_ms {
+            return OpenDecision::reject(
+                Some(format!(
+                    "read bandwidth budget exhausted ({} bytes/min per IP)",
+                    self.bytes_per_minute
+                )),
+                Some(retry_ms),
+            );
+        }
 
         // A whitelisted connection is never metered, so it does no per-event
         // work and can take the passthrough fast path. Everyone else needs `req`
@@ -132,17 +185,9 @@ impl ReadFilter for ReadBandwidth {
             return EventVerdict::Deliver;
         };
 
-        // Refill: elapsed/60 of a full minute's worth of bytes, clamped to a
-        // minute and capped at capacity (same shape as ratelimit.rs).
-        let now = Instant::now();
-        let mut elapsed = now.duration_since(bucket.last_refill);
-        let min = Duration::from_secs(60);
-        if elapsed > min {
-            elapsed = min;
-        }
-        let refill = (elapsed.as_secs_f64() / 60.0) * cap;
-        bucket.tokens = (bucket.tokens + refill).min(cap);
-        bucket.last_refill = now;
+        // Refill (elapsed/60 of a minute's bytes, capped at capacity) then test
+        // affordability. Same refill used at reqOpen to peek for backpressure.
+        bucket.refill(cap);
 
         if bucket.tokens < ev.size() as f64 {
             EventVerdict::Stop
