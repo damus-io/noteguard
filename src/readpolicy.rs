@@ -11,7 +11,7 @@
 //! ## Batch semantics (the check / commit split)
 //!
 //! Unlike the write side's pure `fn(event) -> action`, read filters carry
-//! cross-event state (a per-conn delivery counter) and can withhold
+//! cross-event state (a per-IP byte bucket, a per-conn counter) and can withhold
 //! the *rest* of a batch once a budget is exhausted. To compose these correctly
 //! the engine runs a **two-phase** batch loop per event:
 //!
@@ -38,7 +38,7 @@
 //! marshaling and deliver via the zero-copy fast path (no `req` batches).
 
 use crate::read_filter::{Admission, ConnContext, EventVerdict, OpenDecision, ReadFilter};
-use crate::readfilters::MaxEventsPerConn;
+use crate::readfilters::{MaxEventsPerConn, ReadBandwidth};
 use crate::readmsg::{ReadInput, ReqOpenResponse, ReqResponse, UnparsedNote};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -116,6 +116,7 @@ impl ReadPolicy {
     /// All built-in read filters, available on every new [`ReadPolicy`].
     fn register_builtin_filters(&mut self) {
         self.register_filter::<MaxEventsPerConn>();
+        self.register_filter::<ReadBandwidth>();
     }
 
     /// Compose the pipeline from config. Unlike the write side (which panics on a
@@ -421,7 +422,7 @@ mod tests {
         engine
     }
 
-    /// An [`UnparsedNote`] built from real wire JSON.
+    /// An [`UnparsedNote`] built from wire JSON so `size()` is realistic.
     fn unparsed_note(id: &str, kind: i64, content: &str) -> UnparsedNote {
         let json = format!(
             r#"{{"id":"{}","pubkey":"00","content":"{}","created_at":0,"kind":{},"tags":[],"sig":"00"}}"#,
@@ -533,6 +534,99 @@ mod tests {
         assert_eq!(engine.filter_batch(1, "s", &events(&["c"])), vec!["c"]);
     }
 
+    #[test]
+    fn bandwidth_disables_passthrough() {
+        // A bandwidth budget means strfry must keep sending `req` so we can meter
+        // bytes — so NOT passthrough, even with no guest and no count cap.
+        let mut engine = engine(
+            r#"
+            pipeline = ["read_bandwidth"]
+            [filters.read_bandwidth]
+            bytes_per_minute = 1000
+        "#,
+        );
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s","ip":"1.2.3.4"}"#)
+            .unwrap();
+        assert_eq!(open, r#"{"reqId":0,"action":"accept"}"#);
+    }
+
+    #[test]
+    fn bandwidth_caps_delivery_by_bytes() {
+        // Budget for exactly two events' worth of bytes (single-char ids => all
+        // events are the same wire size). Refill over the sub-ms test window
+        // floors to ~0, so the byte cap is deterministic.
+        let size = unparsed_note("a", 1, "").size() as u64;
+        let mut engine = engine(&format!(
+            r#"
+            pipeline = ["read_bandwidth"]
+            [filters.read_bandwidth]
+            bytes_per_minute = {}
+        "#,
+            size * 2 + 1
+        ));
+        engine.handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s","ip":"9.9.9.9"}"#);
+
+        // First two fit the budget; the rest are withheld once bytes run out.
+        assert_eq!(
+            engine.filter_batch(1, "s", &events(&["a", "b", "c", "d"])),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn bandwidth_keyed_per_ip_survives_reconnect() {
+        // Budget for exactly one event.
+        let size = unparsed_note("a", 1, "").size() as u64;
+        let mut engine = engine(&format!(
+            r#"
+            pipeline = ["read_bandwidth"]
+            [filters.read_bandwidth]
+            bytes_per_minute = {}
+        "#,
+            size + 1
+        ));
+
+        // connId=1 from ip X spends the whole budget on its first event.
+        engine.handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s","ip":"1.2.3.4"}"#);
+        let first = engine.filter_batch(1, "s", &events(&["a", "b"]));
+        assert_eq!(first, vec!["a"]); // 2nd withheld; bucket now ~empty
+
+        // Reconnect: brand-new connId, SAME ip. Because the bucket is keyed by IP
+        // (and not evicted on connClose), the budget is still empty.
+        engine.handle(r#"{"type":"connClose","connId":1}"#);
+        engine.handle(r#"{"type":"reqOpen","reqId":0,"connId":2,"subId":"s","ip":"1.2.3.4"}"#);
+        let second = engine.filter_batch(2, "s", &events(&["c"]));
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn bandwidth_whitelist_exempts_and_passes_through() {
+        // Whitelisted IP: the bandwidth gate is skipped entirely, so delivery
+        // continues past a budget that would otherwise cap it — and, doing no
+        // per-event work, the subscription is reported passthrough.
+        let size = unparsed_note("a", 1, "").size() as u64;
+        let mut engine = engine(&format!(
+            r#"
+            pipeline = ["read_bandwidth"]
+            [filters.read_bandwidth]
+            bytes_per_minute = {}
+            whitelist = ["5.5.5.5"]
+        "#,
+            size
+        ));
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s","ip":"5.5.5.5"}"#)
+            .unwrap();
+        assert_eq!(open, r#"{"reqId":0,"action":"accept","passthrough":true}"#);
+
+        // And even if strfry sends `req`, all events deliver (no metering).
+        assert_eq!(
+            engine.filter_batch(1, "s", &events(&["a", "b", "c"])),
+            vec!["a", "b", "c"]
+        );
+    }
+
     /// A test-only filter that withholds (`Skip`) any event whose id starts with
     /// `x`, and otherwise delivers. Used to exercise cross-filter composition
     /// (an earlier stateful filter must not charge an event a later filter
@@ -590,6 +684,33 @@ mod tests {
         // skipped "x0", only "a" would survive.
         assert_eq!(
             engine.filter_batch(1, "s", &events(&["x0", "a", "b", "c"])),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn count_and_bandwidth_compose() {
+        // count cap 5, bandwidth budget for 2 events, pipeline [count, bandwidth]:
+        // bandwidth is the binding constraint here and caps the batch at 2.
+        let size = unparsed_note("a", 1, "").size() as u64;
+        let mut engine = engine(&format!(
+            r#"
+            pipeline = ["max_events_per_conn", "read_bandwidth"]
+            [filters.max_events_per_conn]
+            max = 5
+            [filters.read_bandwidth]
+            bytes_per_minute = {}
+        "#,
+            size * 2 + 1
+        ));
+        // Both throttles need events, so the sub is non-passthrough.
+        let open = engine
+            .handle(r#"{"type":"reqOpen","reqId":0,"connId":1,"subId":"s","ip":"7.7.7.7"}"#)
+            .unwrap();
+        assert_eq!(open, r#"{"reqId":0,"action":"accept"}"#);
+
+        assert_eq!(
+            engine.filter_batch(1, "s", &events(&["a", "b", "c"])),
             vec!["a", "b"]
         );
     }

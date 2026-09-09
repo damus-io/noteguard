@@ -22,7 +22,7 @@ use serde_json::Value;
 /// Wrapping the raw JSON (rather than a fully-parsed [`Note`]) lets us measure
 /// the exact number of bytes strfry streamed — [`size`](Self::size) is the wire
 /// length with no re-serialization — while deferring the cost of a full parse to
-/// the paths that actually need field access. A filter that only meters volume
+/// the paths that actually need field access. The bandwidth-only metering path
 /// never parses a `Note` at all; it only ever calls `size()` and, for the
 /// accept-list, the cheap id-only [`id`](Self::id).
 ///
@@ -35,8 +35,8 @@ use serde_json::Value;
 pub struct UnparsedNote(Box<RawValue>);
 
 impl UnparsedNote {
-    /// Exact byte length of the event object as strfry streamed it — the wire
-    /// cost of delivering it. No re-serialization.
+    /// Exact byte length of the event object as strfry streamed it (the token
+    /// cost charged by the bandwidth throttle). No re-serialization.
     pub fn size(&self) -> usize {
         self.0.get().len()
     }
@@ -48,7 +48,7 @@ impl UnparsedNote {
     }
 
     /// Cheaply parse just the event `id` for the accept-list, avoiding a full
-    /// [`Note`] parse for filters that never look at an event's fields.
+    /// [`Note`] parse on the bandwidth-only path.
     pub fn id(&self) -> serde_json::Result<String> {
         #[derive(Deserialize)]
         struct IdOnly {

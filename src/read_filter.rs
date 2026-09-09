@@ -11,19 +11,18 @@
 //!   [`conn_close`](ReadFilter::conn_close) — so a filter can allocate per-sub /
 //!   per-conn state and free it deterministically.
 //! * **Stateful, order-dependent batch filtering** — filters keep cross-event
-//!   state (a per-conn delivery counter) and use
+//!   state (a per-IP byte bucket, a per-conn counter) and use
 //!   [`EventVerdict::Stop`] to withhold the *rest* of a batch once a budget is
 //!   exhausted, not just an independent per-event boolean.
 //! * **A check / commit split** — [`filter_event`](ReadFilter::filter_event) is
 //!   a *check* that must not consume budget; the engine calls
 //!   [`on_delivered`](ReadFilter::on_delivered) exactly once, and only when
-//!   *every* filter delivered the event, so counters advance only for
+//!   *every* filter delivered the event, so counters/buckets advance only for
 //!   events that actually reach the client (see the module docs on
 //!   [`crate::readpolicy`]).
 //! * **Shared per-connection context** — the engine caches the client IP +
 //!   authed pubkey at `reqOpen` (a `req` batch carries no IP) and hands every
-//!   hook a [`ConnContext`], so a per-client filter can key its own state by
-//!   identity.
+//!   hook a [`ConnContext`].
 //!
 //! **Fail-open** is a per-filter contract: a filter that errors or whose guest
 //! traps must return [`EventVerdict::Deliver`] rather than withhold a
@@ -64,7 +63,7 @@ pub enum EventVerdict {
     /// guest reject).
     Skip,
     /// Withhold this event and every subsequent event in the batch (e.g. a
-    /// delivery budget just ran out).
+    /// count/bandwidth budget just ran out).
     Stop,
 }
 
@@ -88,7 +87,7 @@ pub enum Admission {
 /// subscription is passthrough (strfry skips per-event marshaling) only if *no*
 /// filter needs per-event work. `needs_events` is evaluated per subscription, so
 /// it may depend on per-sub state established in `req_open` (e.g. whether this
-/// connection is exempt from the filter entirely).
+/// connection is bandwidth-whitelisted).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenDecision {
     pub admission: Admission,
@@ -150,8 +149,8 @@ pub trait ReadFilter {
         EventVerdict::Deliver
     }
 
-    /// Called, in pipeline order, after an event was delivered by *every*
-    /// filter. The place to consume budget / bump counters exactly once. Defaults to a
+    /// Called, in pipeline order, after an event was delivered by *every* filter.
+    /// The place to consume budget / bump counters exactly once. Defaults to a
     /// no-op (stateless filters need nothing here).
     fn on_delivered(&mut self, _ctx: &ConnContext, _ev: &UnparsedNote) {}
 

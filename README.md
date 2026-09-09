@@ -201,11 +201,24 @@ subscription is passthrough). Filters run in order per event.
 ```toml
 [readpolicy]
 # compose the read filters, in order. Empty/absent => deliver all.
-pipeline = ["max_events_per_conn"]
+pipeline = ["max_events_per_conn", "read_bandwidth"]
 
 # connection-level throttle: max events delivered per connection.
 [readpolicy.filters.max_events_per_conn]
 max = 5000
+
+# read-bandwidth throttle: max BYTES of events delivered per minute, keyed per
+# client IP. Reconnecting with a fresh connId from the same IP does NOT reset the
+# budget — the read-side analogue of the write-side `ratelimit` filter, metering
+# the exact wire size of each delivered event via an Instant token bucket
+# (tokens = bytes). Once an IP's per-minute byte budget is spent, further events
+# in the batch are withheld.
+[readpolicy.filters.read_bandwidth]
+bytes_per_minute = 5000000
+# exempt entries: an entry matches a connection's client IP OR its authed pubkey
+# hex (optional). A whitelisted connection is never metered and takes the
+# passthrough fast path.
+whitelist = ["127.0.0.1", "0000…0000"]
 ```
 
 Each filter is a [`ReadFilter`](src/read_filter.rs) — a lifecycle-aware,
@@ -223,10 +236,30 @@ skips all per-event marshaling for that subscription and delivers it via its
 zero-copy fast path, never sending `req` batches (it still sends
 `reqClose`/`connClose`). Each filter declares whether it needs events for a given
 subscription, and the engine ANDs those: an empty pipeline is always
-passthrough, while a configured throttle keeps the subscription non-passthrough
-(strfry must keep sending events for the counter to bound delivery). Emitting
-the field is forward-compatible: a strfry without passthrough support simply
-ignores it.
+passthrough; a configured throttle keeps the subscription non-passthrough
+(strfry must keep sending events for the counter/byte-meter to bound delivery);
+and a bandwidth-whitelisted connection is passthrough (it is never metered).
+Emitting the field is forward-compatible: a strfry without passthrough support
+simply ignores it.
+
+**Per-IP bandwidth keying needs the client IP:** `read_bandwidth` meters per
+client IP so a reconnect can't reset the budget. `req` batches carry
+no IP, so noteguard caches the IP from the `reqOpen` message (added by newer
+strfry builds, alongside `connId`/`authed`) under its `connId`. Against an older
+strfry that doesn't send `ip`, metering degrades gracefully to per-connection
+(logged once per connection as a warning) — a reconnect then gets a fresh budget.
+
+**Per-thread scoping (important):** strfry runs *one plugin process per
+read-serving thread* (`relay.numThreads.reqWorker` / `reqMonitor`), each with its
+own in-memory byte buckets. A given connection is served by one thread, so the
+per-IP budget only survives a reconnect that lands on the *same* thread; the
+effective per-IP budget is therefore up to `numThreads ×
+read_bandwidth.bytes_per_minute`. This is the same per-process scoping the write-side
+`ratelimit` filter has (its buckets live in the per-ingester-thread process).
+For exact per-IP enforcement, set `relay.numThreads.reqWorker = 1` and
+`relay.numThreads.reqMonitor = 1`; otherwise treat the limit as approximate.
+(True cross-thread enforcement would require sharing bucket state across plugin
+processes, which this phase does not do.)
 
 ## Testing
 
