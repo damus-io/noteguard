@@ -50,6 +50,33 @@ fn default_api_base() -> String {
     "https://api.cloudflare.com/client/v4".to_string()
 }
 
+/// Marker embedded in each list item's comment, followed by the ban's wall-clock
+/// expiry (unix seconds). This makes the Cloudflare list self-describing: on
+/// startup [`BanWorker::reconcile`] re-reads these to recover removals that an
+/// earlier process added but never got to delete (see the module docs). The
+/// marker also scopes reconciliation to *our* items, so a shared list's other
+/// entries are never touched.
+const BAN_MARKER: &str = "noteguard-ban;until=";
+
+/// Seconds since the unix epoch (saturating to 0 on the impossible pre-epoch
+/// clock), used for the wall-clock expiry stamped into item comments. The
+/// worker's in-process timer uses [`Instant`] instead; only the persisted stamp
+/// needs to be wall-clock so it survives a restart.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse the expiry out of a list item's comment, or `None` if it isn't one of
+/// noteguard's items.
+fn parse_until(comment: &str) -> Option<u64> {
+    let rest = comment.split(BAN_MARKER).nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 /// The `[cloudflare]` config table. The API token is *not* here — it comes from
 /// the `CLOUDFLARE_API_TOKEN` environment variable so the secret stays out of
 /// the config file.
@@ -79,10 +106,14 @@ struct BanCommand {
 /// The Cloudflare list operations the worker needs. Abstracted behind a trait so
 /// the worker's scheduling/dedup logic can be unit-tested without real HTTP.
 trait CfApi: Send {
-    /// Append `ip` to the list (Cloudflare de-duplicates by value).
-    fn add(&self, ip: &str);
+    /// Append `ip` to the list with its `until_unix` expiry stamped into the
+    /// comment (Cloudflare de-duplicates by value).
+    fn add(&self, ip: &str, until_unix: u64);
     /// Resolve `ip`'s list-item id and delete it.
     fn remove(&self, ip: &str);
+    /// Every noteguard-tagged item currently in the list, as `(ip, until_unix)`,
+    /// for startup reconciliation.
+    fn list_bans(&self) -> Vec<(String, u64)>;
 }
 
 /// Live Cloudflare Lists API client (`ureq`, blocking).
@@ -112,11 +143,13 @@ impl CloudflareApi {
 
 #[cfg(feature = "cloudflare")]
 impl CfApi for CloudflareApi {
-    fn add(&self, ip: &str) {
+    fn add(&self, ip: &str, until_unix: u64) {
         // POST a one-element batch; the Lists API is async and returns an
         // operation_id, but for a single IP we fire-and-forget — membership
-        // settles within seconds and the local ban covers the gap.
-        let body = serde_json::json!([{ "ip": ip, "comment": self.comment }]);
+        // settles within seconds and the local ban covers the gap. The expiry is
+        // stamped into the comment so a later process can reconcile it.
+        let comment = format!("{} {BAN_MARKER}{until_unix}", self.comment);
+        let body = serde_json::json!([{ "ip": ip, "comment": comment }]);
         match self
             .agent
             .post(&self.items_url())
@@ -126,6 +159,52 @@ impl CfApi for CloudflareApi {
             Ok(_) => info!("cloudflare: queued edge-ban add for {ip}"),
             Err(e) => warn!("cloudflare: failed to add {ip} to list: {e}"),
         }
+    }
+
+    fn list_bans(&self) -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Follow Cloudflare's pagination cursors so a large list is fully
+        // reconciled rather than silently truncated to the first page.
+        loop {
+            let mut req = self
+                .agent
+                .get(&self.items_url())
+                .set("Authorization", &self.bearer());
+            if let Some(c) = &cursor {
+                req = req.query("cursor", c);
+            }
+            let resp = match req.call() {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!("cloudflare: failed to list items for reconcile: {e}");
+                    break;
+                }
+            };
+            let json: serde_json::Value = match resp.into_json() {
+                Ok(json) => json,
+                Err(e) => {
+                    warn!("cloudflare: bad list-items response during reconcile: {e}");
+                    break;
+                }
+            };
+            if let Some(items) = json["result"].as_array() {
+                for it in items {
+                    let (Some(ip), Some(comment)) = (it["ip"].as_str(), it["comment"].as_str())
+                    else {
+                        continue;
+                    };
+                    if let Some(until) = parse_until(comment) {
+                        out.push((ip.to_owned(), until));
+                    }
+                }
+            }
+            match json["result_info"]["cursors"]["after"].as_str() {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_owned()),
+                _ => break,
+            }
+        }
+        out
     }
 
     fn remove(&self, ip: &str) {
@@ -195,22 +274,42 @@ impl<A: CfApi> BanWorker<A> {
         }
     }
 
-    /// Record a ban for `ip` expiring at `deadline`. Adds to the Cloudflare list
-    /// only on the first ban for an IP; a later ban merely extends the deadline
-    /// (a shorter one is ignored so a ban is never cut short).
-    fn on_ban(&mut self, ip: String, deadline: Instant) {
+    /// Record `ip`'s removal deadline in the schedule. Does not touch Cloudflare
+    /// — callers decide whether a list `add` is also needed.
+    fn track(&mut self, ip: String, deadline: Instant) {
+        self.active.insert(ip.clone(), deadline);
+        self.expiries.push(Reverse((deadline, ip)));
+    }
+
+    /// Record a ban for `ip` expiring at `deadline` (wall-clock `until_unix`,
+    /// stamped into the list item). Adds to the Cloudflare list only on the first
+    /// ban for an IP; a later ban merely extends the deadline (a shorter one is
+    /// ignored so a ban is never cut short). An extension updates only the local
+    /// timer, not the persisted stamp, so after a restart an extended ban falls
+    /// back to its original expiry — acceptable for a rare edge.
+    fn on_ban(&mut self, ip: String, deadline: Instant, until_unix: u64) {
         match self.active.get(&ip) {
             Some(&current) if current >= deadline => {} // already banned at least this long
-            Some(_) => {
-                // Extend: record the later deadline and push a fresh heap entry.
-                // The old entry becomes stale and is skipped on sweep.
-                self.active.insert(ip.clone(), deadline);
-                self.expiries.push(Reverse((deadline, ip)));
-            }
+            Some(_) => self.track(ip, deadline),        // extend; already in the list
             None => {
-                self.active.insert(ip.clone(), deadline);
-                self.expiries.push(Reverse((deadline, ip.clone())));
-                self.api.add(&ip);
+                self.track(ip.clone(), deadline);
+                self.api.add(&ip, until_unix);
+            }
+        }
+    }
+
+    /// Recover state from the Cloudflare list at startup: anything already past
+    /// its stamped expiry is deleted now (these are the removals a prior process
+    /// added but never got to run), and anything still live is re-scheduled on
+    /// the worker's timer without re-adding it. `now_unix` is the current
+    /// wall-clock time in unix seconds.
+    fn reconcile(&mut self, now_unix: u64) {
+        for (ip, until_unix) in self.api.list_bans() {
+            if until_unix <= now_unix {
+                self.api.remove(&ip);
+            } else {
+                let remaining = Duration::from_secs(until_unix - now_unix);
+                self.track(ip, Instant::now() + remaining);
             }
         }
     }
@@ -236,16 +335,22 @@ impl<A: CfApi> BanWorker<A> {
         self.expiries.peek().map(|Reverse((d, _))| *d)
     }
 
-    /// Drive the worker: block until the next command or the next removal is due,
-    /// whichever comes first, then apply it. Exits when the sender is dropped.
+    /// Drive the worker: recover any pending removals left by a prior process,
+    /// then block until the next command or the next removal is due, whichever
+    /// comes first, and apply it. Exits when the sender is dropped.
     fn run(mut self, rx: Receiver<BanCommand>) {
+        self.reconcile(now_unix());
+        self.sweep(Instant::now());
         loop {
             let received = match self.next_deadline() {
                 Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
                 None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match received {
-                Ok(cmd) => self.on_ban(cmd.ip, Instant::now() + cmd.duration),
+                Ok(cmd) => {
+                    let until = now_unix().saturating_add(cmd.duration.as_secs());
+                    self.on_ban(cmd.ip, Instant::now() + cmd.duration, until);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -323,10 +428,12 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// Records `(op, ip)` calls instead of hitting the network.
+    /// Records `(op, ip)` calls instead of hitting the network. `existing` is the
+    /// canned list the worker sees during [`reconcile`](BanWorker::reconcile).
     #[derive(Clone, Default)]
     struct MockApi {
         calls: Arc<Mutex<Vec<(String, String)>>>,
+        existing: Arc<Mutex<Vec<(String, u64)>>>,
     }
 
     impl MockApi {
@@ -336,7 +443,7 @@ mod tests {
     }
 
     impl CfApi for MockApi {
-        fn add(&self, ip: &str) {
+        fn add(&self, ip: &str, _until_unix: u64) {
             self.calls.lock().unwrap().push(("add".into(), ip.into()));
         }
         fn remove(&self, ip: &str) {
@@ -345,6 +452,21 @@ mod tests {
                 .unwrap()
                 .push(("remove".into(), ip.into()));
         }
+        fn list_bans(&self) -> Vec<(String, u64)> {
+            self.existing.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn parses_until_out_of_comment() {
+        assert_eq!(
+            parse_until(&format!("noteguard auto-ban {BAN_MARKER}1757000000")),
+            Some(1_757_000_000)
+        );
+        // A trailing human suffix after the digits is tolerated.
+        assert_eq!(parse_until(&format!("{BAN_MARKER}42 (spam)")), Some(42));
+        // Items that aren't ours are ignored.
+        assert_eq!(parse_until("manually added by ops"), None);
     }
 
     #[test]
@@ -366,9 +488,9 @@ mod tests {
         let t0 = Instant::now();
         let deadline = t0 + Duration::from_secs(60);
 
-        w.on_ban("1.2.3.4".into(), deadline);
+        w.on_ban("1.2.3.4".into(), deadline, 0);
         // A second ban for the same IP within the window must not re-add it.
-        w.on_ban("1.2.3.4".into(), deadline);
+        w.on_ban("1.2.3.4".into(), deadline, 0);
         w.sweep(t0 + Duration::from_secs(1)); // not yet expired
         assert_eq!(api.calls(), vec![("add".into(), "1.2.3.4".into())]);
 
@@ -389,9 +511,9 @@ mod tests {
         let mut w = BanWorker::new(api.clone());
         let t0 = Instant::now();
 
-        w.on_ban("9.9.9.9".into(), t0 + Duration::from_secs(60));
+        w.on_ban("9.9.9.9".into(), t0 + Duration::from_secs(60), 0);
         // Re-ban with a later deadline before the first elapses: extend it.
-        w.on_ban("9.9.9.9".into(), t0 + Duration::from_secs(120));
+        w.on_ban("9.9.9.9".into(), t0 + Duration::from_secs(120), 0);
 
         // At the original deadline the (now stale) entry must NOT trigger a removal.
         w.sweep(t0 + Duration::from_secs(61));
@@ -414,8 +536,8 @@ mod tests {
         let mut w = BanWorker::new(api.clone());
         let t0 = Instant::now();
 
-        w.on_ban("1.1.1.1".into(), t0 + Duration::from_secs(30));
-        w.on_ban("2.2.2.2".into(), t0 + Duration::from_secs(90));
+        w.on_ban("1.1.1.1".into(), t0 + Duration::from_secs(30), 0);
+        w.on_ban("2.2.2.2".into(), t0 + Duration::from_secs(90), 0);
 
         w.sweep(t0 + Duration::from_secs(31)); // only the first expired
         assert_eq!(
@@ -424,6 +546,34 @@ mod tests {
                 ("add".into(), "1.1.1.1".into()),
                 ("add".into(), "2.2.2.2".into()),
                 ("remove".into(), "1.1.1.1".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_removes_stale_and_reschedules_live_without_readding() {
+        let api = MockApi::default();
+        // Simulate the list left behind by a prior process: one ban already
+        // past its expiry, one still live.
+        *api.existing.lock().unwrap() = vec![
+            ("5.5.5.5".into(), 1_000), // expired as of now_unix = 2_000
+            ("6.6.6.6".into(), 3_000), // still 1_000s to go
+        ];
+        let mut w = BanWorker::new(api.clone());
+
+        w.reconcile(2_000);
+        // The stale ban's lost removal is recovered immediately; the live ban is
+        // neither re-added (it's already in the list) nor removed yet.
+        assert_eq!(api.calls(), vec![("remove".into(), "5.5.5.5".into())]);
+
+        // The live ban is scheduled, so once its (rescheduled) deadline passes it
+        // is removed — and never re-added.
+        w.sweep(Instant::now() + Duration::from_secs(2_000));
+        assert_eq!(
+            api.calls(),
+            vec![
+                ("remove".into(), "5.5.5.5".into()),
+                ("remove".into(), "6.6.6.6".into()),
             ]
         );
     }
