@@ -91,11 +91,17 @@ max = 5000
 
 # Read-bandwidth throttle: cap the BYTES of events delivered per minute, keyed
 # per client IP so reconnecting with a fresh connId does not reset the budget.
-# The read-side analogue of `filters.ratelimit` above. strfry runs one plugin
-# process per read-serving thread, so the effective per-IP limit is up to
-# `relay.numThreads.reqWorker` times this value — see the README.
+# The read-side analogue of `filters.ratelimit` above.
 [readpolicy.filters.read_bandwidth]
 bytes_per_minute = 5000000
+# Shared-memory buckets: strfry runs one plugin process per read-serving thread,
+# so without this the effective per-IP limit is up to `relay.numThreads.reqWorker
+# + reqMonitor` times `bytes_per_minute`. Point every process at one tmpfs file
+# and the per-IP budget becomes a single authoritative bucket across all of them
+# (see the README). Unset => per-process buckets (accurate only within one
+# process). Fails open (delivers) if the file can't be mapped or the table fills.
+# shared_state_path = "/dev/shm/noteguard-read-bandwidth"
+# max_ips = 65536  # distinct IPs the shared table holds before it fails open
 # Exempt entries; each matches a connection's client IP OR its authed pubkey
 # hex. A whitelisted connection is never metered, so this filter asks for no
 # per-event work for it (the subscription is then passthrough unless another

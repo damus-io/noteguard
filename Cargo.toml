@@ -17,6 +17,12 @@ toml = "0.5"
 ipnetwork = "0.20.0"
 unicode-security = "0.1.2"
 
+# shared-memory per-IP read-bandwidth buckets: one mmap'd MAP_SHARED file shared
+# by every `noteguard read` plugin process on the host (memmap2), timestamped
+# against the system-wide CLOCK_MONOTONIC (libc clock_gettime).
+memmap2 = "0.9"
+libc = "0.2"
+
 # forwarder deps
 tokio-tungstenite = { version = "0.23.1", optional = true, features = ["native-tls"] }
 tokio = { version = "1.38.0", features = ["macros", "time", "sync", "rt-multi-thread"], optional = true }

@@ -4,6 +4,7 @@
 
 mod bandwidth;
 mod max_events;
+mod shm;
 
 #[cfg(feature = "nscript")]
 mod nscript;

@@ -1,36 +1,8 @@
 use crate::read_filter::{ConnContext, EventVerdict, OpenDecision, ReadFilter};
+use crate::readfilters::shm::SharedByteBuckets;
 use crate::readmsg::UnparsedNote;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-/// An `Instant` token bucket of *bytes*, keyed per client IP. Mirrors the
-/// write-side `ratelimit.rs` mechanism (there tokens are posts; here they are
-/// bytes). Refills at `bytes_per_minute` bytes per minute up to that capacity,
-/// and — like `ratelimit.rs`'s `sources` map — is **never evicted**: surviving a
-/// reconnect is the entire point of keying on IP.
-struct ByteBucket {
-    /// Bytes of budget currently available. Starts full (capacity).
-    tokens: f64,
-    /// When `tokens` was last refilled.
-    last_refill: Instant,
-}
-
-impl ByteBucket {
-    /// Refill toward `cap` by the elapsed fraction of a minute (same shape as
-    /// `ratelimit.rs`), clamped to one minute's worth and capped at `cap`.
-    fn refill(&mut self, cap: f64) {
-        let now = Instant::now();
-        let mut elapsed = now.duration_since(self.last_refill);
-        let min = Duration::from_secs(60);
-        if elapsed > min {
-            elapsed = min;
-        }
-        let refill = (elapsed.as_secs_f64() / 60.0) * cap;
-        self.tokens = (self.tokens + refill).min(cap);
-        self.last_refill = now;
-    }
-}
 
 /// Nominal event size (bytes) assumed at `reqOpen`, where the next event's real
 /// wire size is unknown. Used both to decide whether the IP's bucket can afford
@@ -41,11 +13,44 @@ impl ByteBucket {
 /// always affords it and only a drained IP trips the reject.
 const NOMINAL_EVENT_SIZE: u64 = 512;
 
+/// Default table capacity: distinct IPs before the table fills and fails open.
+/// ~65k slots × ~80 bytes ≈ 5 MB on tmpfs.
+fn default_max_ips() -> u32 {
+    65536
+}
+
+/// Where the per-IP byte buckets live for this process.
+#[derive(Default)]
+enum Store {
+    /// Not yet built (built lazily on first `reqOpen`, since construction can't
+    /// do I/O).
+    #[default]
+    Uninit,
+    /// A shared path was configured but its `mmap`/init failed: this process
+    /// meters nothing and fails open (delivers). Distinct from [`Store::Anon`],
+    /// which is the intentional no-path mode.
+    Failed,
+    /// A working per-IP byte-bucket table (shared file, or a private anonymous
+    /// map when no path was configured).
+    Map(SharedByteBuckets),
+}
+
 /// Read-bandwidth throttle: cap the *bytes* of events delivered per minute,
 /// keyed per client IP so reconnecting with a fresh `connId` from the same IP
 /// does not reset the budget. The read-side analogue of the write-side
 /// `ratelimit` filter, metering the exact wire byte size of each delivered event
 /// via a per-IP byte bucket.
+///
+/// ## Cross-process enforcement
+///
+/// strfry runs one `noteguard read` process per read-serving thread, each with
+/// its own memory, so an IP's reconnects fan across up to `numThreads`
+/// processes — making a naive per-process bucket enforce `bytes_per_minute × N`.
+/// To enforce ONE authoritative budget per IP while keeping N processes, the
+/// buckets live in a shared `mmap`'d table
+/// ([`SharedByteBuckets`](crate::readfilters::shm)) named by `shared_state_path`.
+/// With no path configured the map is per-process (the old behavior); a
+/// configured path that fails to attach fails open (delivers, unmetered).
 ///
 /// Once an IP's bucket can't cover the next event, the rest of the batch is
 /// withheld ([`EventVerdict::Stop`]). A whitelisted connection is exempt
@@ -61,10 +66,25 @@ pub struct ReadBandwidth {
     #[serde(default)]
     pub whitelist: Vec<String>,
 
-    /// Client IP (or `conn:<id>` fallback) -> its byte bucket. Never evicted, so
-    /// a reconnect from the same IP shares the same budget.
+    /// Path to the shared-memory file holding the per-IP buckets, shared by every
+    /// `noteguard read` process on the host (all must agree on the path and
+    /// `max_ips`). `None` (unset, or empty) => a private per-process map —
+    /// accurate only within one process, i.e. the pre-shared-memory behavior. Set
+    /// it to a `tmpfs` path such as `/dev/shm/noteguard-read-bandwidth` to enforce
+    /// ONE budget per IP across all read processes. A configured but unattachable
+    /// path fails open (delivers, unmetered).
+    #[serde(default)]
+    pub shared_state_path: Option<String>,
+
+    /// Table capacity: distinct IPs held before the table fills and new IPs fail
+    /// open (there is no eviction — buckets must survive reconnect). Rounded up
+    /// to a power of two.
+    #[serde(default = "default_max_ips")]
+    pub max_ips: u32,
+
+    /// The per-IP byte buckets for this process. Built lazily on first use.
     #[serde(skip)]
-    buckets: HashMap<String, ByteBucket>,
+    store: Store,
 
     /// `connId` -> the bucket key to charge, resolved once at `reqOpen` (a
     /// connection's IP, whitelist status and authed pubkey are fixed for its
@@ -105,6 +125,64 @@ impl ReadBandwidth {
             }
         })
     }
+
+    /// Build the byte-bucket store on first use (construction can't do I/O). A
+    /// configured `shared_state_path` opens a shared file; unset (or empty) uses
+    /// a private per-process map; a configured path that fails to attach records
+    /// [`Store::Failed`] so the filter fails open (delivers, unmetered).
+    fn ensure_store(&mut self) {
+        if !matches!(self.store, Store::Uninit) {
+            return;
+        }
+        let path = match self.shared_state_path.as_deref() {
+            Some("") | None => None,
+            Some(p) => Some(p.to_string()),
+        };
+        self.store = match path {
+            None => match SharedByteBuckets::anonymous(self.max_ips) {
+                Ok(m) => {
+                    log::info!(
+                        "read_bandwidth: no shared_state_path; per-process byte buckets \
+                         ({} slots) — cross-process enforcement is OFF",
+                        m.slot_count()
+                    );
+                    Store::Map(m)
+                }
+                Err(e) => {
+                    log::error!("read_bandwidth: could not allocate byte buckets ({e}); failing open");
+                    Store::Failed
+                }
+            },
+            Some(path) => match SharedByteBuckets::open(&path, self.max_ips) {
+                Ok(m) => {
+                    log::info!(
+                        "read_bandwidth: shared byte buckets at {} ({} slots)",
+                        path,
+                        m.slot_count()
+                    );
+                    Store::Map(m)
+                }
+                Err(e) => {
+                    log::error!(
+                        "read_bandwidth: shared byte-bucket init failed at {} ({}); \
+                         FAILING OPEN (delivering unmetered)",
+                        path,
+                        e
+                    );
+                    Store::Failed
+                }
+            },
+        };
+    }
+
+    /// The working byte-bucket table, or `None` if metering is unavailable
+    /// (a failed shared init) — in which case the filter fails open.
+    fn map(&self) -> Option<&SharedByteBuckets> {
+        match &self.store {
+            Store::Map(m) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 impl ReadFilter for ReadBandwidth {
@@ -113,9 +191,11 @@ impl ReadFilter for ReadBandwidth {
     }
 
     fn req_open(&mut self, ctx: &ConnContext, _filter: Option<&serde_json::Value>) -> OpenDecision {
-        // Resolve identity once per connection, so the per-event path is a
-        // single `connId` lookup with no allocation, no whitelist rescan, and
-        // (against an old strfry) one missing-IP warning rather than a flood.
+        // Build the shared store on first use, then resolve identity once per
+        // connection, so the per-event path is a single `connId` lookup with no
+        // allocation, no whitelist rescan, and (against an old strfry) one
+        // missing-IP warning rather than a flood.
+        self.ensure_store();
         let key = self.resolve_key(ctx);
         let cap = self.bytes_per_minute as f64;
 
@@ -124,27 +204,27 @@ impl ReadFilter for ReadBandwidth {
         // gets a NIP-01 CLOSED + retry hint (real backpressure) instead of a
         // silent empty/truncated feed — the reconnect/churn abuse case. While
         // there is still budget we admit and meter per-event on `req` as before.
+        //
+        // A `None` from the map (fail open) or a failed store leaves this None,
+        // so we admit.
         let mut reject_retry_ms: Option<u64> = None;
-        if let Some(key) = &key {
-            // Create the bucket full on first sight of this IP — but never
-            // reset an existing one, which must survive a reconnect.
-            let bucket = self.buckets.entry(key.clone()).or_insert(ByteBucket {
-                tokens: cap,
-                last_refill: Instant::now(),
-            });
-            bucket.refill(cap);
-            // Nominal event size clamped to capacity: a fresh (full) bucket
-            // always affords it, so only a drained IP trips the reject.
-            let nominal = (NOMINAL_EVENT_SIZE as f64).min(cap);
-            if bucket.tokens < nominal {
-                // retry_ms: time to refill one nominal event at
-                // bytes_per_minute. An estimate — the next event's real size is
-                // unknown at reqOpen (documented on NOMINAL_EVENT_SIZE).
-                reject_retry_ms = Some(((nominal / cap) * 60_000.0).ceil() as u64);
+        if let (Some(key), Some(map)) = (&key, self.map()) {
+            if let Some(tokens) = map.tokens_after_refill(key.as_bytes(), cap) {
+                // Nominal event size clamped to capacity: a fresh (full) bucket
+                // always affords it, so only a drained IP trips the reject.
+                let nominal = (NOMINAL_EVENT_SIZE as f64).min(cap);
+                if tokens < nominal {
+                    // retry_ms: time to refill one nominal event at
+                    // bytes_per_minute. An estimate — the next event's real size
+                    // is unknown at reqOpen (documented on NOMINAL_EVENT_SIZE).
+                    reject_retry_ms = Some(((nominal / cap) * 60_000.0).ceil() as u64);
+                }
             }
         }
 
-        let exempt = key.is_none();
+        // Metering happens only for a keyed connection with a working map; a
+        // whitelisted conn (no key) or a failed store does no per-event work.
+        let meters = key.is_some() && self.map().is_some();
         self.conn_keys.insert(ctx.conn_id, key);
 
         if let Some(retry_ms) = reject_retry_ms {
@@ -157,13 +237,13 @@ impl ReadFilter for ReadBandwidth {
             );
         }
 
-        // A whitelisted connection is never metered, so it does no per-event
-        // work and can take the passthrough fast path. Everyone else needs `req`
-        // batches so we can meter bytes.
-        if exempt {
-            OpenDecision::passthrough()
-        } else {
+        // A connection we won't meter does no per-event work and can take the
+        // passthrough fast path (whitelisted, or the store failed open).
+        // Everyone else needs `req` batches so we can meter bytes.
+        if meters {
             OpenDecision::needs_events()
+        } else {
+            OpenDecision::passthrough()
         }
     }
 
@@ -173,40 +253,36 @@ impl ReadFilter for ReadBandwidth {
         // byte is charged in `on_delivered`.
         //
         // A missing entry means whitelisted, or a `req` for a subscription we
-        // never saw open: deliver either way (fail open).
+        // never saw open; a missing/failed map means fail open: deliver either
+        // way.
         let cap = self.bytes_per_minute as f64;
-        let Self {
-            buckets, conn_keys, ..
-        } = self;
-        let Some(Some(key)) = conn_keys.get(&ctx.conn_id) else {
+        let Some(Some(key)) = self.conn_keys.get(&ctx.conn_id) else {
             return EventVerdict::Deliver;
         };
-        let Some(bucket) = buckets.get_mut(key) else {
+        let Some(map) = self.map() else {
             return EventVerdict::Deliver;
         };
 
         // Refill (elapsed/60 of a minute's bytes, capped at capacity) then test
-        // affordability. Same refill used at reqOpen to peek for backpressure.
-        bucket.refill(cap);
-
-        if bucket.tokens < ev.size() as f64 {
-            EventVerdict::Stop
-        } else {
-            EventVerdict::Deliver
+        // affordability. `None` (fail open) delivers.
+        match map.tokens_after_refill(key.as_bytes(), cap) {
+            Some(tokens) if tokens < ev.size() as f64 => EventVerdict::Stop,
+            _ => EventVerdict::Deliver,
         }
     }
 
     fn on_delivered(&mut self, ctx: &ConnContext, ev: &UnparsedNote) {
         // The bucket was resolved (and refilled) in `filter_event` for this same
-        // event, so it exists; charge the delivered event's exact wire size.
-        let Self {
-            buckets, conn_keys, ..
-        } = self;
-        if let Some(Some(key)) = conn_keys.get(&ctx.conn_id) {
-            if let Some(bucket) = buckets.get_mut(key) {
-                bucket.tokens -= ev.size() as f64;
-            }
-        }
+        // event; charge the delivered event's exact wire size. Best-effort: a
+        // fail-open acquire just skips the charge.
+        let cap = self.bytes_per_minute as f64;
+        let Some(Some(key)) = self.conn_keys.get(&ctx.conn_id) else {
+            return;
+        };
+        let Some(map) = self.map() else {
+            return;
+        };
+        map.spend(key.as_bytes(), cap, ev.size() as f64);
     }
 
     fn conn_close(&mut self, conn_id: u64) {

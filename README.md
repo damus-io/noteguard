@@ -342,17 +342,28 @@ strfry builds, alongside `connId`/`authed`) under its `connId`. Against an older
 strfry that doesn't send `ip`, metering degrades gracefully to per-connection
 (logged once per connection as a warning) — a reconnect then gets a fresh budget.
 
-**Per-thread scoping (important):** strfry runs *one plugin process per
-read-serving thread* (`relay.numThreads.reqWorker` / `reqMonitor`), each with its
-own in-memory byte buckets. A given connection is served by one thread, so the
-per-IP budget only survives a reconnect that lands on the *same* thread; the
-effective per-IP budget is therefore up to `numThreads ×
-read_bandwidth.bytes_per_minute`. This is the same per-process scoping the write-side
-`ratelimit` filter has (its buckets live in the per-ingester-thread process).
-For exact per-IP enforcement, set `relay.numThreads.reqWorker = 1` and
-`relay.numThreads.reqMonitor = 1`; otherwise treat the limit as approximate.
-(True cross-thread enforcement would require sharing bucket state across plugin
-processes, which this phase does not do.)
+**Per-thread scoping and shared memory:** strfry runs *one plugin process per
+read-serving thread* (`relay.numThreads.reqWorker` / `reqMonitor`), each a
+separate `noteguard read` process. A connection is pinned to one thread
+(`connId % numThreads`), so a naive per-process bucket only survives a reconnect
+that lands on the *same* thread — an IP's reconnects fan across up to `numThreads`
+processes, making the effective per-IP budget up to `numThreads ×
+read_bandwidth.bytes_per_minute`.
+
+To enforce **one** authoritative budget per IP while keeping every read thread,
+set `read_bandwidth.shared_state_path` to a path on `tmpfs`
+(e.g. `/dev/shm/noteguard-read-bandwidth`): every `noteguard read` process on the
+host then `mmap`s the same file, a fixed open-addressing IP→bucket table guarded
+by per-slot spinlocks, so an IP's budget is a single shared bucket regardless of
+which process serves a given connection. The table sizes to `max_ips` distinct
+IPs (default 65536, no eviction — buckets must survive a reconnect) and *fails
+open* (delivers, unmetered) if it fills, if a slot lock can't be taken, or if the
+`mmap` can't be created. It lives on `tmpfs`, so it survives strfry restarts and
+resets on reboot. Leaving `shared_state_path` unset keeps the old per-process
+behavior (accurate only within a single process). Only `read_bandwidth` needs
+this; `max_events_per_conn` is keyed by `connId`, which is already pinned to one
+process, so its counter is authoritative as-is. (The write-side `ratelimit`
+filter has the same per-process scoping and is unaffected by this key.)
 
 ### NScript read filter (experimental)
 
