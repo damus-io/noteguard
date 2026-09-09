@@ -407,6 +407,63 @@ mod tests {
         }
     }
 
+    // Helper to build a mock "new" message carrying arbitrary note content.
+    fn create_mock_content_message(content: &str) -> InputMessage {
+        let mut msg = create_mock_input_message("content_event", "new", "mock_source_info");
+        msg.event.content = content.to_string();
+        msg
+    }
+
+    #[test]
+    fn test_content_filter_homoglyph() {
+        let mut noteguard = Noteguard::new();
+
+        let config: Config = toml::from_str(
+            r#"
+            pipeline = ["content"]
+            [filters.content]
+            filters = ["Damus Airdrop"]
+        "#,
+        )
+        .expect("Failed to parse config");
+
+        noteguard
+            .load_config(&config)
+            .expect("Failed to load config");
+
+        // "Dаmus Аirdrop" — the 'а'/'А' are Cyrillic (U+0430/U+0410) homoglyphs,
+        // the actual bytes seen in airdrop-scam spam. A raw substring check would
+        // miss this; the confusables skeleton folds it back to "Damus Airdrop".
+        let spam = "\u{1F680} D\u{0430}mus \u{0410}irdrop is open \u{00B7} \
+                    Check your claim https://tinyurl.com/damuslive/";
+        assert_eq!(
+            noteguard.run(create_mock_content_message(spam)).action,
+            Action::ShadowReject
+        );
+
+        // Plain ASCII match and a case variant both still get caught.
+        assert_eq!(
+            noteguard
+                .run(create_mock_content_message("free Damus Airdrop here"))
+                .action,
+            Action::ShadowReject
+        );
+        assert_eq!(
+            noteguard
+                .run(create_mock_content_message("DAMUS AIRDROP!!!"))
+                .action,
+            Action::ShadowReject
+        );
+
+        // An unrelated note is accepted.
+        assert_eq!(
+            noteguard
+                .run(create_mock_content_message("gm nostr, lovely morning"))
+                .action,
+            Action::Accept
+        );
+    }
+
     #[test]
     fn test_deserialize_input_message() {
         let input_json = r#"

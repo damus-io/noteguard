@@ -12,8 +12,15 @@ ban_after = 10
 ban_duration_secs = 3600 # one hour
 ban_message = "banned: too many rate-limit violations, try again later"
 
+# Substring blocklist. Matching is homoglyph- and case-insensitive: both the
+# note content and each term are folded to their UTS #39 confusables skeleton
+# and lowercased before comparison, so Cyrillic/look-alike spoofs like
+# "Dаmus Аirdrop" (Cyrillic а/А) are caught by the plain "Damus Airdrop" entry.
 [filters.content]
-filters = ["https://cdn.nostr.build/i/some-spammy-or-abusive-image-image.png"]
+filters = [
+    "https://cdn.nostr.build/i/some-spammy-or-abusive-image-image.png",
+    "Damus Airdrop",
+]
 
 [filters.whitelist]
 pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]
