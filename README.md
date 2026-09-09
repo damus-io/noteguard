@@ -94,6 +94,12 @@ Settings:
 
 - `message` *optional*: the error message to return when connection is rate-limited. default is: `rate-limited: you are noting too much`
 
+- `ban_after` *optional*: IP-ban persistent offenders. After this many *consecutive* rate-limit rejections from the same IP (a streak that any accepted post resets), every note from that IP is rejected until the ban expires. Omit to disable banning — the filter then only ever rate-limits.
+
+- `ban_duration_secs` *optional*: how long an IP-ban lasts, in seconds. Default is `3600` (one hour).
+
+- `ban_message` *optional*: the error message returned to a banned IP. Default is: `banned: too many rate-limit violations, try again later`
+
 ### Whitelist
 
 * name: `whitelist`
