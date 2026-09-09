@@ -6,6 +6,9 @@ pub mod readfilters;
 pub mod readmsg;
 pub mod readpolicy;
 
+#[cfg(feature = "nscript")]
+pub mod nscript;
+
 pub use messages::{Action, InputMessage, OutputMessage};
 pub use note_filter::{Note, NoteFilter};
 pub use read_filter::{Admission, ConnContext, EventVerdict, OpenDecision, ReadFilter};

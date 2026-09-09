@@ -86,8 +86,8 @@ pub enum Admission {
 /// The engine ANDs `!needs_events` across all filters to decide passthrough: a
 /// subscription is passthrough (strfry skips per-event marshaling) only if *no*
 /// filter needs per-event work. `needs_events` is evaluated per subscription, so
-/// it may depend on per-sub state established in `req_open` (e.g. whether this
-/// connection is bandwidth-whitelisted).
+/// it may depend on per-sub state established in `req_open` (e.g. whether a guest
+/// actually loaded, or whether this connection is bandwidth-whitelisted).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenDecision {
     pub admission: Admission,

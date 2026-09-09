@@ -3,6 +3,9 @@ use noteguard::filters::{Blacklist, Content, Kinds, ProtectedEvents, RateLimit, 
 #[cfg(feature = "forwarder")]
 use noteguard::filters::Forwarder;
 
+#[cfg(feature = "nscript")]
+use noteguard::filters::NScript;
+
 use log::info;
 use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
@@ -54,6 +57,9 @@ impl Noteguard {
 
         #[cfg(feature = "forwarder")]
         self.register_filter::<Forwarder>();
+
+        #[cfg(feature = "nscript")]
+        self.register_filter::<NScript>();
     }
 
     /// Run the loaded filters. You must call `load_config` before calling this, otherwise

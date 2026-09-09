@@ -41,14 +41,14 @@ impl UnparsedNote {
         self.0.get().len()
     }
 
-    /// Fully parse the event into a [`Note`]. Only used by a filter that
+    /// Fully parse the event into a [`Note`]. Only used when a guest filter
     /// actually needs the event's fields.
     pub fn parse(&self) -> serde_json::Result<Note> {
         serde_json::from_str(self.0.get())
     }
 
     /// Cheaply parse just the event `id` for the accept-list, avoiding a full
-    /// [`Note`] parse on the bandwidth-only path.
+    /// [`Note`] parse on the bandwidth-only (no-guest) path.
     pub fn id(&self) -> serde_json::Result<String> {
         #[derive(Deserialize)]
         struct IdOnly {

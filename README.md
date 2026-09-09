@@ -166,6 +166,57 @@ be queued if the connection goes down (up to the `queue_size` buffer limit)
 
 - `queue_size` *optional* - size of the note queue, this is used to buffer notes if the connection goes down. Default is 1000.
 
+### NScript (experimental)
+
+* name: `nscript`
+
+Runs a user-supplied **WASM** module as a note filter. Instead of compiling
+filters into noteguard, the logic lives in a sandboxed wasm guest that reads the
+note through an *accessor ABI* — a set of imported host functions
+(`note_pubkey`, `note_kind`, `note_targets_owner`, `is_following`, …) — rather
+than parsing a note buffer itself. The note's byte format is therefore an
+implementation detail of the host, and guests stay tiny (the example below is
+under 300 bytes: no note parser is linked into it).
+
+The intent is programmable, per-npub server-side filtering (e.g. inbox / mention
+spam control), eventually submitted to the relay as a signed event. This is a
+**Phase 0 spike**: the guest is loaded from a local path and the owner context
+comes from config.
+
+Build with the `nscript` feature:
+
+```sh
+$ cargo build --features nscript
+```
+
+Config:
+
+- `module` — path to the compiled guest `.wasm`
+- `owner` *optional* — hex pubkey the script is scoped to (its "inbox owner")
+- `follows` *optional* — hex pubkeys the owner follows (backs `is_following`)
+- `message` *optional* — message returned to the client on reject
+
+```toml
+[filters.nscript]
+module = "./follows_only.wasm"
+owner = "1111…1111"
+follows = ["2222…2222"]
+message = "blocked: not in owner's follows"
+```
+
+Guests are bounded by wasm **fuel** and a **memory cap** per note, and noteguard
+**fails open** (accepts) if a guest traps or exhausts its budget, so a broken or
+runaway filter can't block writes or hang the relay.
+
+An example guest (`follows-only`, an inbox filter that rejects notes to the owner
+from non-followed authors) lives in [`nscript-guests/`](nscript-guests). Build it
+with:
+
+```sh
+$ cd nscript-guests/follows-only
+$ cargo build --release --target wasm32-unknown-unknown
+```
+
 ## Read-policy (readPolicy) mode
 
 Everything above is the **write-side** plugin: it decides what gets *stored* (a
@@ -201,7 +252,7 @@ subscription is passthrough). Filters run in order per event.
 ```toml
 [readpolicy]
 # compose the read filters, in order. Empty/absent => deliver all.
-pipeline = ["max_events_per_conn", "read_bandwidth"]
+pipeline = ["max_events_per_conn", "read_bandwidth", "nscript"]
 
 # connection-level throttle: max events delivered per connection.
 [readpolicy.filters.max_events_per_conn]
@@ -219,6 +270,17 @@ bytes_per_minute = 5000000
 # hex (optional). A whitelisted connection is never metered and takes the
 # passthrough fast path.
 whitelist = ["127.0.0.1", "0000…0000"]
+
+# guest wasm applied to subscriptions (owner = the authed subscriber). Requires
+# the `nscript` build feature; the pipeline entry is skipped (fail open) in a
+# build without it.
+[readpolicy.filters.nscript]
+module = "./mute_word.wasm"
+# STUB for follow-set distribution: owner-hex -> hex pubkeys they follow.
+# Backs the guest's is_following accessor until scripts/follows are sourced
+# from signed on-relay submissions.
+[readpolicy.filters.nscript.follows]
+# "1111…1111" = ["2222…2222"]
 ```
 
 Each filter is a [`ReadFilter`](src/read_filter.rs) — a lifecycle-aware,
@@ -238,7 +300,8 @@ zero-copy fast path, never sending `req` batches (it still sends
 subscription, and the engine ANDs those: an empty pipeline is always
 passthrough; a configured throttle keeps the subscription non-passthrough
 (strfry must keep sending events for the counter/byte-meter to bound delivery);
-and a bandwidth-whitelisted connection is passthrough (it is never metered).
+a bandwidth-whitelisted connection is passthrough (it is never metered); and a
+`nscript` filter is non-passthrough only when it actually loaded a guest.
 Emitting the field is forward-compatible: a strfry without passthrough support
 simply ignores it.
 
@@ -260,6 +323,39 @@ For exact per-IP enforcement, set `relay.numThreads.reqWorker = 1` and
 `relay.numThreads.reqMonitor = 1`; otherwise treat the limit as approximate.
 (True cross-thread enforcement would require sharing bucket state across plugin
 processes, which this phase does not do.)
+
+### NScript read filter (experimental)
+
+* name: `nscript`
+
+The read path can drive the same nscript WASM runtime as the write-side
+[`nscript`](#nscript-experimental) filter, so it needs the `nscript` feature
+(`cargo build --release --features nscript`); without it the pipeline entry is
+logged and skipped (fail open). The subscriber (the NIP-42 `authed` pubkey) is
+the script **owner**, so a per-npub feed filter runs scoped to whoever is
+reading. The guest is compiled once per process and re-scoped per subscriber —
+no recompile per subscription. The `Verdict` collapses on the read path to
+**deliver** (`Accept`) vs **withhold** (anything else); there is no "shadow"
+concept for reads. It fails open: a missing/failed module or a trapping guest
+delivers everything.
+
+An unauthenticated subscription (no `authed`) still runs the guest, but with no
+owner: an owner-scoped filter like `follows-only` then no-ops and delivers
+everything, while an owner-independent filter still applies. The
+[`mute-word`](nscript-guests/mute-word) example guest (withholds kind-1 notes
+containing a muted word) is owner-independent, which makes it convenient for
+exercising the read path without AUTH:
+
+```sh
+$ cd nscript-guests/mute-word
+$ cargo build --release --target wasm32-unknown-unknown
+```
+
+Script/follow **distribution is stubbed** for this phase (configured statically
+via `module` and the `follows` map rather than sourced from signed submission
+events on the relay); the point of the read mode today is the protocol + runtime
+wiring.
+
 
 ## Testing
 

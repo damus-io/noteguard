@@ -8,6 +8,9 @@ mod whitelist;
 #[cfg(feature = "forwarder")]
 mod forwarder;
 
+#[cfg(feature = "nscript")]
+mod nscript;
+
 pub use blacklist::Blacklist;
 pub use content::Content;
 pub use kinds::Kinds;
@@ -17,3 +20,6 @@ pub use whitelist::Whitelist;
 
 #[cfg(feature = "forwarder")]
 pub use forwarder::Forwarder;
+
+#[cfg(feature = "nscript")]
+pub use nscript::NScript;

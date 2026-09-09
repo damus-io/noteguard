@@ -45,6 +45,9 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
+#[cfg(feature = "nscript")]
+use crate::readfilters::NScriptRead;
+
 /// The `[readpolicy]` config table (read from `noteguard.toml`, or the file
 /// named by `$NOTEGUARD_CONFIG`). Mirrors the write-side `Config`: an ordered
 /// `pipeline` of filter names plus a `filters` map of each filter's own config.
@@ -113,10 +116,14 @@ impl ReadPolicy {
         );
     }
 
-    /// All built-in read filters, available on every new [`ReadPolicy`].
+    /// All built-in read filters, available on every new [`ReadPolicy`]. The
+    /// guest (`nscript`) filter is registered only in `nscript` builds.
     fn register_builtin_filters(&mut self) {
         self.register_filter::<MaxEventsPerConn>();
         self.register_filter::<ReadBandwidth>();
+
+        #[cfg(feature = "nscript")]
+        self.register_filter::<NScriptRead>();
     }
 
     /// Compose the pipeline from config. Unlike the write side (which panics on a

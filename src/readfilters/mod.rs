@@ -5,5 +5,11 @@
 mod bandwidth;
 mod max_events;
 
+#[cfg(feature = "nscript")]
+mod nscript;
+
 pub use bandwidth::ReadBandwidth;
 pub use max_events::MaxEventsPerConn;
+
+#[cfg(feature = "nscript")]
+pub use nscript::NScriptRead;
