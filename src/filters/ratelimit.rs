@@ -1,20 +1,12 @@
+use crate::filters::ban::BanTracker;
 use crate::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Default IP-ban duration once an IP trips [`RateLimit::ban_after`]: one hour.
-const DEFAULT_BAN_DURATION_SECS: u64 = 3600;
-
 pub struct Tokens {
     pub tokens: i32,
     pub last_post: Instant,
-    /// Consecutive rate-limit rejections since the last accepted post. Reset to
-    /// zero whenever a post is accepted, and whenever an expired ban is cleared.
-    pub strikes: i32,
-    /// When set and still in the future, every post from this IP is rejected
-    /// outright (the IP-ban). Cleared, along with `strikes`, once it elapses.
-    pub banned_until: Option<Instant>,
 }
 
 #[derive(Deserialize, Default)]
@@ -23,27 +15,14 @@ pub struct RateLimit {
     pub whitelist: Option<Vec<String>>,
     pub message: Option<String>,
 
-    /// IP-ban an offender after this many *consecutive* rate-limit rejections.
-    /// `None` (the default) disables banning: the filter only ever rate-limits.
-    pub ban_after: Option<i32>,
-    /// How long an IP-ban lasts, in seconds. Defaults to
-    /// [`DEFAULT_BAN_DURATION_SECS`] (one hour) when `ban_after` is set.
-    pub ban_duration_secs: Option<u64>,
-    /// Message returned to a banned IP. Falls back to a generic notice.
-    pub ban_message: Option<String>,
+    /// IP-ban persistent offenders. `ban_after` *consecutive* rate-limit
+    /// rejections (a streak any accepted post resets) trips a ban; see
+    /// [`BanTracker`]. Flattened so `ban_after` etc. sit at this filter's level.
+    #[serde(flatten)]
+    pub ban: BanTracker,
 
     #[serde(skip)]
     pub sources: HashMap<String, Tokens>,
-}
-
-impl RateLimit {
-    fn ban_reject(&self, id: String) -> OutputMessage {
-        let message = self
-            .ban_message
-            .as_deref()
-            .unwrap_or("banned: too many rate-limit violations, try again later");
-        OutputMessage::new(id, Action::Reject, Some(message.to_owned()))
-    }
 }
 
 impl NoteFilter for RateLimit {
@@ -60,31 +39,28 @@ impl NoteFilter for RateLimit {
 
         let now = Instant::now();
 
+        // Enforce an active IP-ban before touching the token bucket, so a banned
+        // IP cannot refill or reset anything by continuing to hammer us.
+        if self.ban.is_banned(&msg.source_info, now) {
+            return OutputMessage::new(
+                msg.event.id.clone(),
+                Action::Reject,
+                Some(self.ban.message().to_owned()),
+            );
+        }
+
         if !self.sources.contains_key(&msg.source_info) {
             self.sources.insert(
                 msg.source_info.to_owned(),
                 Tokens {
                     last_post: now,
                     tokens: self.posts_per_minute,
-                    strikes: 0,
-                    banned_until: None,
                 },
             );
             return OutputMessage::new(msg.event.id.clone(), Action::Accept, None);
         }
 
         let entry = self.sources.get_mut(&msg.source_info).expect("impossiburu");
-
-        // Enforce an active IP-ban before touching the token bucket, so a banned
-        // IP cannot refill or reset anything by continuing to hammer us.
-        if let Some(until) = entry.banned_until {
-            if now < until {
-                return self.ban_reject(msg.event.id.clone());
-            }
-            entry.banned_until = None;
-            entry.strikes = 0;
-        }
-
         let mut diff = now - entry.last_post;
 
         let min = Duration::from_secs(60);
@@ -107,13 +83,12 @@ impl NoteFilter for RateLimit {
         if entry.tokens == 0 {
             // Persistent offender: escalate a streak of rate-limit hits into an
             // IP-ban once it crosses the configured threshold.
-            if let Some(ban_after) = self.ban_after {
-                entry.strikes += 1;
-                if entry.strikes >= ban_after {
-                    let secs = self.ban_duration_secs.unwrap_or(DEFAULT_BAN_DURATION_SECS);
-                    entry.banned_until = Some(now + Duration::from_secs(secs));
-                    return self.ban_reject(msg.event.id.clone());
-                }
+            if self.ban.strike(&msg.source_info, now) {
+                return OutputMessage::new(
+                    msg.event.id.clone(),
+                    Action::Reject,
+                    Some(self.ban.message().to_owned()),
+                );
             }
 
             let message = self
@@ -130,7 +105,7 @@ impl NoteFilter for RateLimit {
 
         entry.last_post = now;
         // A successful post breaks the rate-limit streak.
-        entry.strikes = 0;
+        self.ban.reset(&msg.source_info);
         OutputMessage::new(msg.event.id.clone(), Action::Accept, None)
     }
 }
@@ -158,13 +133,13 @@ mod tests {
         }
     }
 
+    fn ratelimit(toml_cfg: &str) -> RateLimit {
+        toml::from_str(toml_cfg).expect("valid ratelimit config")
+    }
+
     #[test]
     fn bans_after_consecutive_strikes() {
-        let mut rl = RateLimit {
-            posts_per_minute: 1,
-            ban_after: Some(3),
-            ..Default::default()
-        };
+        let mut rl = ratelimit("posts_per_minute = 1\nban_after = 3\n");
 
         // First post seeds the bucket and is accepted.
         assert_eq!(rl.filter_note(&msg("e1", "1.2.3.4")).action, Action::Accept);
@@ -188,10 +163,7 @@ mod tests {
 
     #[test]
     fn no_ban_when_unconfigured() {
-        let mut rl = RateLimit {
-            posts_per_minute: 1,
-            ..Default::default()
-        };
+        let mut rl = ratelimit("posts_per_minute = 1\n");
 
         assert_eq!(rl.filter_note(&msg("e1", "1.2.3.4")).action, Action::Accept);
         // Without `ban_after`, persistent hammering only ever rate-limits.
@@ -204,12 +176,7 @@ mod tests {
 
     #[test]
     fn whitelisted_ip_is_never_banned() {
-        let mut rl = RateLimit {
-            posts_per_minute: 1,
-            ban_after: Some(2),
-            whitelist: Some(vec!["1.2.3.4".to_string()]),
-            ..Default::default()
-        };
+        let mut rl = ratelimit("posts_per_minute = 1\nban_after = 2\nwhitelist = [\"1.2.3.4\"]\n");
 
         for i in 0..10 {
             let r = rl.filter_note(&msg(&format!("e{i}"), "1.2.3.4"));
@@ -218,29 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn expired_ban_clears_and_allows_again() {
-        let mut rl = RateLimit {
-            posts_per_minute: 2,
-            ban_after: Some(2),
-            ..Default::default()
-        };
+    fn a_successful_post_resets_the_streak() {
+        let mut rl = ratelimit("posts_per_minute = 2\nban_after = 2\n");
 
-        // Seed + drain the bucket, then two back-to-back rejections trip the ban.
+        // Seed + drain, then one rate-limit rejection (strike 1).
         assert_eq!(rl.filter_note(&msg("e1", "5.6.7.8")).action, Action::Accept);
         assert_eq!(rl.filter_note(&msg("e2", "5.6.7.8")).action, Action::Accept);
         assert_eq!(rl.filter_note(&msg("e3", "5.6.7.8")).action, Action::Reject);
-        assert!(rl
-            .filter_note(&msg("e4", "5.6.7.8"))
-            .msg
-            .unwrap()
-            .contains("banned"));
 
-        // Force the ban into the past and let the bucket refill: the next post
-        // should clear the ban, reset strikes, and be accepted.
-        let entry = rl.sources.get_mut("5.6.7.8").unwrap();
-        entry.banned_until = Some(Instant::now() - Duration::from_secs(1));
-        entry.last_post = Instant::now() - Duration::from_secs(120);
-        assert_eq!(rl.filter_note(&msg("e5", "5.6.7.8")).action, Action::Accept);
-        assert_eq!(rl.sources.get("5.6.7.8").unwrap().strikes, 0);
+        // Refill the bucket so the next post is accepted, resetting the streak.
+        rl.sources.get_mut("5.6.7.8").unwrap().last_post = Instant::now() - Duration::from_secs(120);
+        assert_eq!(rl.filter_note(&msg("e4", "5.6.7.8")).action, Action::Accept);
+
+        // A fresh streak now needs the full `ban_after` again — the next lone
+        // rejection must NOT ban.
+        let r = rl.filter_note(&msg("e5", "5.6.7.8"));
+        assert_eq!(r.action, Action::Reject);
+        assert!(!r.msg.unwrap().contains("banned"));
     }
 }

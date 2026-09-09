@@ -21,6 +21,14 @@ filters = [
     "https://cdn.nostr.build/i/some-spammy-or-abusive-image-image.png",
     "Damus Airdrop",
 ]
+# IP-ban repeat offenders (same knobs as `filters.ratelimit`). Content
+# violations accrue *cumulatively* per IP — unlike ratelimit's consecutive
+# streak, a clean note does not reset the count — and once they cross
+# `ban_after`, every note from that IP is silently shadow-rejected for
+# `ban_duration_secs`. Omit `ban_after` to disable banning (match-only, as
+# before). `ban_message` is unused here since the ban is a stealth shadow-reject.
+ban_after = 5
+ban_duration_secs = 3600 # one hour
 
 [filters.whitelist]
 pubkeys = ["16c21558762108afc34e4ff19e4ed51d9a48f79e0c34531efc423d21ab435e93"]

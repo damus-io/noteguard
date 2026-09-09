@@ -1,3 +1,4 @@
+mod ban;
 mod blacklist;
 mod content;
 mod kinds;
