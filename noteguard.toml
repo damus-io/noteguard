@@ -22,3 +22,51 @@ kinds = [30065, 1064, 34550, 4550]
 4550 = "blocked: please use a dedicated relay for moderated communities"
 
 [filters.protected_events]
+
+# ---------------------------------------------------------------------------
+# Read policy — `noteguard read`
+#
+# Everything above is the write side: what gets *stored*. This section is the
+# read side: which already-stored events are *delivered* to a given subscriber.
+# Withholding an event never touches storage and never affects any other
+# subscriber. strfry runs it as a separate process against this same file:
+#
+#   readPolicy { plugin = "./noteguard read" }
+# ---------------------------------------------------------------------------
+[readpolicy]
+# Read filters to compose, in order. Empty (the default) delivers everything,
+# and every subscription takes strfry's zero-copy passthrough fast path. The
+# filter tables below are inert until their name is listed here.
+pipeline = []
+# pipeline = ["max_events_per_conn", "read_bandwidth", "nscript"]
+
+# Per-connection delivery cap: withhold once this connection has been delivered
+# `max` events, counted across all of its subscriptions and freed on disconnect.
+[readpolicy.filters.max_events_per_conn]
+max = 5000
+
+# Read-bandwidth throttle: cap the BYTES of events delivered per minute, keyed
+# per client IP so reconnecting with a fresh connId does not reset the budget.
+# The read-side analogue of `filters.ratelimit` above. strfry runs one plugin
+# process per read-serving thread, so the effective per-IP limit is up to
+# `relay.numThreads.reqWorker` times this value — see the README.
+[readpolicy.filters.read_bandwidth]
+bytes_per_minute = 5000000
+# Exempt entries; each matches a connection's client IP OR its authed pubkey
+# hex. A whitelisted connection is never metered, so this filter asks for no
+# per-event work for it (the subscription is then passthrough unless another
+# filter in the pipeline still needs events).
+whitelist = ["127.0.0.1"]
+
+# Guest wasm run per subscription, scoped to the subscriber (owner = the NIP-42
+# authed pubkey), so a per-npub feed filter runs scoped to whoever is reading.
+# Requires the `nscript` build feature; without it this pipeline entry is logged
+# and skipped (fail open).
+[readpolicy.filters.nscript]
+module = "./mute_word.wasm"
+
+# STUB for follow-set distribution: owner-hex -> the hex pubkeys they follow,
+# backing the guest's `is_following` accessor, until scripts and follows are
+# sourced from signed on-relay submissions.
+[readpolicy.filters.nscript.follows]
+# "1111…1111" = ["2222…2222"]
