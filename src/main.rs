@@ -8,7 +8,7 @@ use noteguard::{Action, InputMessage, NoteFilter, OutputMessage};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::io;
 
 #[derive(Deserialize)]
 struct Config {
@@ -107,12 +107,24 @@ impl Noteguard {
 #[cfg(feature = "forwarder")]
 #[tokio::main]
 async fn main() {
-    noteguard();
+    dispatch();
 }
 
 #[cfg(not(feature = "forwarder"))]
 fn main() {
-    noteguard();
+    dispatch();
+}
+
+/// Route to the write-policy loop (default) or the read-policy loop
+/// (`noteguard read`). strfry invokes the read plugin as a plain shell command,
+/// e.g. `relay.readPolicy.plugin = "./noteguard read"`.
+fn dispatch() {
+    env_logger::init();
+
+    match std::env::args().nth(1).as_deref() {
+        Some("read") => noteguard::readpolicy::run(),
+        _ => noteguard(),
+    }
 }
 
 fn serialize_output_message(msg: &OutputMessage) -> String {
@@ -120,17 +132,13 @@ fn serialize_output_message(msg: &OutputMessage) -> String {
 }
 
 fn noteguard() {
-    env_logger::init();
     info!("running noteguard");
 
-    let config_path = "noteguard.toml";
+    let config_path = noteguard::config_path();
     let mut noteguard = Noteguard::new();
 
     let config: Config = {
-        let mut file = std::fs::File::open(config_path).expect("Failed to open config file");
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)
-            .expect("Failed to read config file");
+        let contents = std::fs::read_to_string(&config_path).expect("Failed to read config file");
         toml::from_str(&contents).expect("Failed to parse config file")
     };
 
