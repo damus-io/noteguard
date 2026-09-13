@@ -141,12 +141,13 @@ fn dispatch() {
     }
 }
 
-/// `noteguard dump-buckets [--json] [--capacity BYTES] [PATH]` — a read-only
-/// operator peek into the shared per-IP read-bandwidth byte-bucket table (see
-/// [`noteguard::readfilters::dump`]). Prints one row per OCCUPIED slot — the key
-/// (client IP), bytes remaining, and how long ago the slot last refilled —
-/// sorted most-throttled first. With `--capacity` it also shows each bucket
-/// refilled to now and how full that leaves it. Never mutates the file.
+/// `noteguard dump-buckets [--json] [--capacity BYTES] [--sort tokens|age|key]
+/// [--reverse] [PATH]` — a read-only operator peek into the shared per-IP
+/// read-bandwidth byte-bucket table (see [`noteguard::readfilters::dump`]).
+/// Prints one row per OCCUPIED slot — the key (client IP), bytes remaining, and
+/// how long ago the slot last refilled — sorted most-throttled first by default
+/// (`--sort`/`--reverse` to reorder). With `--capacity` it also shows each
+/// bucket refilled to now and how full that leaves it. Never mutates the file.
 fn dump_buckets() {
     use std::io::Write;
 
@@ -154,15 +155,18 @@ fn dump_buckets() {
     // module so `--capacity` can project a bucket's balance to now.
     const MINUTE_NS: f64 = 60.0 * 1_000_000_000.0;
 
-    // Parse: an optional `--json`, an optional `--capacity BYTES`, and an
-    // optional trailing PATH (defaults to the tmpfs file the read filter uses).
+    // Parse: an optional `--json`, `--capacity BYTES`, `--sort KEY`, `--reverse`,
+    // and an optional trailing PATH (defaults to the tmpfs file the filter uses).
     let mut json = false;
     let mut capacity: Option<f64> = None;
+    let mut sort = "tokens".to_string();
+    let mut reverse = false;
     let mut path: Option<String> = None;
     let mut args = std::env::args().skip(2);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--reverse" => reverse = true,
             "--capacity" => {
                 capacity = match args.next().and_then(|v| v.parse::<f64>().ok()) {
                     Some(c) if c > 0.0 => Some(c),
@@ -172,12 +176,30 @@ fn dump_buckets() {
                     }
                 };
             }
+            "--sort" => {
+                sort = match args.next().as_deref() {
+                    Some(k @ ("tokens" | "age" | "key")) => k.to_string(),
+                    _ => {
+                        eprintln!("dump-buckets: --sort needs one of: tokens, age, key");
+                        std::process::exit(2);
+                    }
+                };
+            }
             "-h" | "--help" => {
-                println!("usage: noteguard dump-buckets [--json] [--capacity BYTES] [PATH]");
+                println!(
+                    "usage: noteguard dump-buckets [--json] [--capacity BYTES] \
+                     [--sort tokens|age|key] [--reverse] [PATH]"
+                );
                 println!(
                     "  inspect the shared read-bandwidth byte buckets (default {})",
                     noteguard::readfilters::DEFAULT_PATH
                 );
+                println!(
+                    "  --sort tokens  bytes remaining, fewest first (default; most-throttled)"
+                );
+                println!("  --sort age     last-refill age, most-recently-active first");
+                println!("  --sort key     client IP/key, lexical");
+                println!("  --reverse      flip the sort direction");
                 return;
             }
             other if other.starts_with('-') => {
@@ -220,13 +242,26 @@ fn dump_buckets() {
         (e.tokens + (elapsed / MINUTE_NS) * cap).min(cap)
     };
 
-    // Sort most-throttled first (fewest bytes remaining), the default an
-    // operator hunting for a hammered IP wants at the top.
+    // Sort per `--sort`. Each key's default direction is the one an operator
+    // usually wants at the top; `--reverse` flips it. `tokens` (the default)
+    // ascends so the most-throttled IP leads; `age` ascends so the freshest
+    // (most-recently-active) leads; `key` is plain lexical.
     let mut entries = dump.entries;
     entries.sort_by(|a, b| {
-        a.tokens
-            .partial_cmp(&b.tokens)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let ord = match sort.as_str() {
+            "age" => age_ns(a).cmp(&age_ns(b)),
+            "key" => a.key.cmp(&b.key),
+            // "tokens" (default): fewest bytes remaining first.
+            _ => a
+                .tokens
+                .partial_cmp(&b.tokens)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        };
+        if reverse {
+            ord.reverse()
+        } else {
+            ord
+        }
     });
 
     if json {
