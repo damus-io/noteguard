@@ -11,6 +11,7 @@ mod nscript;
 
 pub use bandwidth::ReadBandwidth;
 pub use max_events::MaxEventsPerConn;
+pub use shm::{dump, BucketEntry, Dump, DEFAULT_PATH};
 
 #[cfg(feature = "nscript")]
 pub use nscript::NScriptRead;

@@ -136,7 +136,188 @@ fn dispatch() {
 
     match std::env::args().nth(1).as_deref() {
         Some("read") => noteguard::readpolicy::run(),
+        Some("dump-buckets") => dump_buckets(),
         _ => noteguard(),
+    }
+}
+
+/// `noteguard dump-buckets [--json] [--capacity BYTES] [PATH]` — a read-only
+/// operator peek into the shared per-IP read-bandwidth byte-bucket table (see
+/// [`noteguard::readfilters::dump`]). Prints one row per OCCUPIED slot — the key
+/// (client IP), bytes remaining, and how long ago the slot last refilled —
+/// sorted most-throttled first. With `--capacity` it also shows each bucket
+/// refilled to now and how full that leaves it. Never mutates the file.
+fn dump_buckets() {
+    use std::io::Write;
+
+    // One minute in nanoseconds — the refill window, mirrored from the shm
+    // module so `--capacity` can project a bucket's balance to now.
+    const MINUTE_NS: f64 = 60.0 * 1_000_000_000.0;
+
+    // Parse: an optional `--json`, an optional `--capacity BYTES`, and an
+    // optional trailing PATH (defaults to the tmpfs file the read filter uses).
+    let mut json = false;
+    let mut capacity: Option<f64> = None;
+    let mut path: Option<String> = None;
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--capacity" => {
+                capacity = match args.next().and_then(|v| v.parse::<f64>().ok()) {
+                    Some(c) if c > 0.0 => Some(c),
+                    _ => {
+                        eprintln!("dump-buckets: --capacity needs a positive number of bytes");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "-h" | "--help" => {
+                println!("usage: noteguard dump-buckets [--json] [--capacity BYTES] [PATH]");
+                println!(
+                    "  inspect the shared read-bandwidth byte buckets (default {})",
+                    noteguard::readfilters::DEFAULT_PATH
+                );
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("dump-buckets: unknown flag {other}");
+                std::process::exit(2);
+            }
+            other => {
+                if path.replace(other.to_string()).is_some() {
+                    eprintln!("dump-buckets: only one PATH may be given");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+    let path = path.unwrap_or_else(|| noteguard::readfilters::DEFAULT_PATH.to_string());
+
+    let dump = match noteguard::readfilters::dump(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("dump-buckets: cannot read {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Age in nanoseconds against the clock `dump` captured; negative means a
+    // last_refill in the future (stale across a reboot — the monotonic clock
+    // reset), which the read filter treats as fully stale (a full bucket).
+    let age_ns =
+        |e: &noteguard::readfilters::BucketEntry| dump.now_ns as i128 - e.last_refill_ns as i128;
+
+    // Project a bucket's balance to now (same shape as the filter's refill:
+    // elapsed/60 of a minute's capacity, clamped to a minute and capped; a
+    // future timestamp resets to full). Only meaningful with a known capacity.
+    let refilled = |e: &noteguard::readfilters::BucketEntry, cap: f64| -> f64 {
+        let age = age_ns(e);
+        if age < 0 {
+            return cap;
+        }
+        let elapsed = (age as f64).min(MINUTE_NS);
+        (e.tokens + (elapsed / MINUTE_NS) * cap).min(cap)
+    };
+
+    // Sort most-throttled first (fewest bytes remaining), the default an
+    // operator hunting for a hammered IP wants at the top.
+    let mut entries = dump.entries;
+    entries.sort_by(|a, b| {
+        a.tokens
+            .partial_cmp(&b.tokens)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if json {
+        // Hand-roll the JSON so we don't need a Serialize impl on the shm types.
+        let mut items = Vec::with_capacity(entries.len());
+        for e in &entries {
+            let mut obj = serde_json::json!({
+                "key": e.key,
+                "tokens": e.tokens,
+                "last_refill_ns": e.last_refill_ns,
+                "age_seconds": age_ns(e) as f64 / 1e9,
+            });
+            if let Some(cap) = capacity {
+                let r = refilled(e, cap);
+                obj["refilled_tokens"] = serde_json::json!(r);
+                obj["percent_full"] = serde_json::json!(r / cap * 100.0);
+            }
+            items.push(obj);
+        }
+        let out = serde_json::json!({
+            "path": path,
+            "slot_count": dump.slot_count,
+            "occupied": entries.len(),
+            "now_ns": dump.now_ns,
+            "capacity": capacity,
+            "buckets": items,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("dump JSON serializes")
+        );
+        return;
+    }
+
+    // Text output. Buffer to stdout so a huge table isn't line-flushed.
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    let _ = writeln!(
+        out,
+        "{}: slot_count={} occupied={}",
+        path,
+        dump.slot_count,
+        entries.len()
+    );
+    if let Some(cap) = capacity {
+        let _ = writeln!(
+            out,
+            "{:<46}  {:>16}  {:>10}  {:>16}  {:>7}",
+            "KEY", "BYTES_REMAINING", "AGE", "REFILLED_NOW", "%FULL"
+        );
+        for e in &entries {
+            let r = refilled(e, cap);
+            let _ = writeln!(
+                out,
+                "{:<46}  {:>16.0}  {:>10}  {:>16.0}  {:>6.1}%",
+                e.key,
+                e.tokens,
+                fmt_age(age_ns(e)),
+                r,
+                r / cap * 100.0,
+            );
+        }
+    } else {
+        let _ = writeln!(
+            out,
+            "{:<46}  {:>16}  {:>10}",
+            "KEY", "BYTES_REMAINING", "AGE"
+        );
+        for e in &entries {
+            let _ = writeln!(
+                out,
+                "{:<46}  {:>16.0}  {:>10}",
+                e.key,
+                e.tokens,
+                fmt_age(age_ns(e)),
+            );
+        }
+    }
+}
+
+/// Render a bucket age (nanoseconds; may be negative if stale across a reboot)
+/// as a short human string like `4.2s` or `stale`.
+fn fmt_age(age_ns: i128) -> String {
+    if age_ns < 0 {
+        return "stale".to_string();
+    }
+    let secs = age_ns as f64 / 1e9;
+    if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        format!("{:.1}m", secs / 60.0)
     }
 }
 

@@ -67,6 +67,11 @@ const MAGIC: u64 = u64::from_le_bytes(*b"NGRDBW\x00\x01");
 /// (→ fail open), rather than misinterpreting its bytes.
 const VERSION: u32 = 1;
 
+/// The conventional shared-memory path for the read-bandwidth buckets, on
+/// `tmpfs`. The default the `read_bandwidth` filter documents and the
+/// [`dump`] operator tool falls back to when given no explicit path.
+pub const DEFAULT_PATH: &str = "/dev/shm/noteguard-read-bandwidth";
+
 /// Fixed key capacity: an IPv6 textual address is at most 45 bytes
 /// (`INET6_ADDRSTRLEN`-ish), and the `conn:<id>` fallback is at most ~25, so 48
 /// covers every key. A longer key fails open.
@@ -330,12 +335,8 @@ impl SharedByteBuckets {
         let state = unsafe { &*addr_of!((*hdr).init_state) };
         let mut spins = 0u64;
         loop {
-            match state.compare_exchange(
-                UNINIT,
-                INITIALIZING,
-                Ordering::Acquire,
-                Ordering::Acquire,
-            ) {
+            match state.compare_exchange(UNINIT, INITIALIZING, Ordering::Acquire, Ordering::Acquire)
+            {
                 Ok(_) => {
                     unsafe {
                         addr_of_mut!((*hdr).magic).write(MAGIC);
@@ -440,6 +441,126 @@ impl SharedByteBuckets {
     }
 }
 
+/// One OCCUPIED bucket, as read by [`dump`]. A read-only, best-effort snapshot
+/// of a slot's body — see [`dump`] for the lock-free-read caveat.
+#[derive(Debug, Clone)]
+pub struct BucketEntry {
+    /// The slot's key: the client IP text, or a `conn:<id>` fallback. Rendered
+    /// lossily (keys are ASCII in practice, but a corrupt/foreign file might not
+    /// be, and a diagnostic tool must never panic on the bytes it finds).
+    pub key: String,
+    /// Bucket balance in bytes at the instant of the snapshot, exactly as last
+    /// written by a metering process — NOT refilled to now (the caller can do
+    /// that against [`Dump::now_ns`] if it knows the capacity).
+    pub tokens: f64,
+    /// This slot's last refill, in `CLOCK_MONOTONIC` nanoseconds — comparable to
+    /// [`Dump::now_ns`] (both read the same host-wide clock).
+    pub last_refill_ns: u64,
+}
+
+/// The result of a [`dump`]: the table's configured `slot_count`, a monotonic
+/// clock reading captured at dump time (so each entry can be aged against the
+/// same clock the buckets use), and every OCCUPIED slot.
+#[derive(Debug, Clone)]
+pub struct Dump {
+    /// Total slot capacity of the table (from the header) — power of two.
+    pub slot_count: u32,
+    /// `CLOCK_MONOTONIC` nanoseconds captured just before scanning the slots.
+    /// Subtract an entry's `last_refill_ns` for its age; the difference can be
+    /// negative for an entry carried across a reboot (the clock reset), which a
+    /// caller should treat as stale.
+    pub now_ns: u64,
+    /// Every OCCUPIED slot, in slot order (unsorted).
+    pub entries: Vec<BucketEntry>,
+}
+
+/// Read-only, best-effort snapshot of the shared byte-bucket table at `path`,
+/// for operator inspection (the `noteguard dump-buckets` CLI). Opens the file
+/// **read-only** and maps it **read-only**: it never writes, so it cannot perturb
+/// live metering or leave a slot lock wedged. Validates the header's magic and
+/// version (a mismatch or an under-sized file is a clear `InvalidData` error)
+/// before trusting any offset.
+///
+/// **Lock-free by design.** Unlike the metering paths, `dump` does *not* take
+/// each slot's spinlock: acquiring the lock writes to the mapping, which a
+/// read-only tool must not do (a tool that died mid-hold would wedge a live
+/// slot). Instead it reads each field directly. This is sound as a diagnostic:
+/// a slot's `key`/`key_len` are written once under lock at claim time and are
+/// immutable thereafter (entries are never evicted), so an OCCUPIED slot's key
+/// never tears; `tokens`/`last_refill` are naturally-aligned 8-byte words whose
+/// reads don't tear on the single-host, coherent-cache architectures this table
+/// targets, though either may read an instant stale versus a concurrent refill.
+/// Good enough to peek at; never authoritative.
+pub fn dump(path: &str) -> io::Result<Dump> {
+    let file = OpenOptions::new().read(true).open(path)?;
+    let len = file.metadata()?.len() as usize;
+    if len < HEADER_SIZE {
+        return Err(invalid("shared byte-bucket file smaller than its header"));
+    }
+    // SAFETY: read-only mapping of a file at least `HEADER_SIZE` long; nothing
+    // else holds a `&mut` to these bytes in this process.
+    let mmap = unsafe { MmapOptions::new().len(len).map(&file)? };
+    let base = mmap.as_ptr();
+
+    // Validate the header before trusting the slot_count it claims.
+    let hdr = base as *const Header;
+    let (magic, version, slot_count) = unsafe {
+        (
+            addr_of!((*hdr).magic).read(),
+            addr_of!((*hdr).version).read(),
+            addr_of!((*hdr).slot_count).read(),
+        )
+    };
+    if magic != MAGIC {
+        return Err(invalid("shared byte-bucket file has wrong magic"));
+    }
+    if version != VERSION {
+        return Err(invalid("shared byte-bucket file version mismatch"));
+    }
+
+    // The file must be large enough to hold the slot table the header claims,
+    // or a slot read would run off the mapping.
+    let slot_count = slot_count as usize;
+    let need = HEADER_SIZE + slot_count * SLOT_SIZE;
+    if len < need {
+        return Err(invalid(
+            "shared byte-bucket file truncated (smaller than its slot table)",
+        ));
+    }
+
+    let now_ns = monotonic_ns();
+    let mut entries = Vec::new();
+    for i in 0..slot_count {
+        // SAFETY: `i < slot_count` and the file is >= HEADER_SIZE + slot_count*SLOT_SIZE.
+        let slot = unsafe { (base.add(HEADER_SIZE) as *const Slot).add(i) };
+        if unsafe { addr_of!((*slot).state).read() } != OCCUPIED {
+            continue;
+        }
+        let key_len = unsafe { addr_of!((*slot).key_len).read() } as usize;
+        // Defensive: never trust an out-of-range key_len from a corrupt file.
+        if key_len > KEY_LEN {
+            continue;
+        }
+        let key = unsafe {
+            let p = addr_of!((*slot).key) as *const u8;
+            String::from_utf8_lossy(std::slice::from_raw_parts(p, key_len)).into_owned()
+        };
+        let tokens = f64::from_bits(unsafe { addr_of!((*slot).tokens).read() });
+        let last_refill_ns = unsafe { addr_of!((*slot).last_refill).read() };
+        entries.push(BucketEntry {
+            key,
+            tokens,
+            last_refill_ns,
+        });
+    }
+
+    Ok(Dump {
+        slot_count: slot_count as u32,
+        now_ns,
+        entries,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,7 +621,10 @@ mod tests {
         m.tokens_after_refill(b"9.9.9.9", cap);
         m.spend(b"9.9.9.9", cap, 250.0);
         let t = m.tokens_after_refill(b"9.9.9.9", cap).unwrap();
-        assert!(t < 0.0, "overspend should leave a negative balance, got {t}");
+        assert!(
+            t < 0.0,
+            "overspend should leave a negative balance, got {t}"
+        );
     }
 
     #[test]
@@ -635,5 +759,47 @@ mod tests {
         // A second process configured for a different max_ips must not silently
         // shard against a different-sized table.
         assert!(SharedByteBuckets::open(&tf.0, 128).is_err());
+    }
+
+    #[test]
+    fn dump_reports_occupied_buckets() {
+        // The operator peek: write two known buckets through the metering paths,
+        // drop the map, then read them back read-only via `dump`.
+        let tf = TmpFile::new("dump");
+        let cap = 1000.0;
+        {
+            let m = SharedByteBuckets::open(&tf.0, 64).unwrap();
+            m.tokens_after_refill(b"1.2.3.4", cap); // full
+            m.spend(b"1.2.3.4", cap, 600.0); // ~400 left
+            m.tokens_after_refill(b"5.6.7.8", cap); // full
+        }
+        let d = dump(&tf.0).unwrap();
+        assert_eq!(d.slot_count, 64);
+        assert_eq!(d.entries.len(), 2, "exactly the two OCCUPIED slots");
+
+        let by_key = |k: &str| {
+            d.entries
+                .iter()
+                .find(|e| e.key == k)
+                .unwrap_or_else(|| panic!("missing bucket for {k}"))
+        };
+        assert!((by_key("1.2.3.4").tokens - 400.0).abs() < 1.0);
+        assert!((by_key("5.6.7.8").tokens - 1000.0).abs() < 1.0);
+
+        // Both slots were just refilled, so their ages are small & non-negative
+        // against the same monotonic clock `dump` captured.
+        for e in &d.entries {
+            let age = d.now_ns as i128 - e.last_refill_ns as i128;
+            assert!(age >= 0, "fresh dump should not see a future last_refill");
+        }
+    }
+
+    #[test]
+    fn dump_rejects_a_non_bucket_file() {
+        // A file that isn't a bucket table (wrong magic) is a clear error, not a
+        // pile of garbage rows.
+        let tf = TmpFile::new("dump-bad");
+        std::fs::write(&tf.0, b"this is definitely not a noteguard bucket file..").unwrap();
+        assert!(dump(&tf.0).is_err());
     }
 }
