@@ -13,6 +13,15 @@ use std::collections::HashMap;
 /// always affords it and only a drained IP trips the reject.
 const NOMINAL_EVENT_SIZE: u64 = 512;
 
+/// The shared-memory path used when `shared_state_path` is left unset — the
+/// default that gives cross-process enforcement out of the box. A conventional
+/// `tmpfs` location so every `noteguard read` process on the host attaches to
+/// ONE authoritative per-IP table without the operator having to configure
+/// anything. Set the field to `""` to opt back out to a private per-process map.
+/// (Same path as [`shm::DEFAULT_PATH`](crate::readfilters::shm::DEFAULT_PATH),
+/// which the `dump-buckets` operator tool falls back to.)
+const DEFAULT_SHARED_STATE_PATH: &str = crate::readfilters::shm::DEFAULT_PATH;
+
 /// Default table capacity: distinct IPs before the table fills and fails open.
 /// ~65k slots × ~80 bytes ≈ 5 MB on tmpfs.
 fn default_max_ips() -> u32 {
@@ -26,12 +35,12 @@ enum Store {
     /// do I/O).
     #[default]
     Uninit,
-    /// A shared path was configured but its `mmap`/init failed: this process
-    /// meters nothing and fails open (delivers). Distinct from [`Store::Anon`],
-    /// which is the intentional no-path mode.
+    /// The shared file's `mmap`/init failed: this process meters nothing and
+    /// fails open (delivers). Distinct from a working anonymous map, which is
+    /// the intentional per-process opt-out (`shared_state_path = ""`).
     Failed,
-    /// A working per-IP byte-bucket table (shared file, or a private anonymous
-    /// map when no path was configured).
+    /// A working per-IP byte-bucket table: the shared file (the default), or a
+    /// private anonymous map when the operator opted out with an empty path.
     Map(SharedByteBuckets),
 }
 
@@ -49,8 +58,12 @@ enum Store {
 /// To enforce ONE authoritative budget per IP while keeping N processes, the
 /// buckets live in a shared `mmap`'d table
 /// ([`SharedByteBuckets`](crate::readfilters::shm)) named by `shared_state_path`.
-/// With no path configured the map is per-process (the old behavior); a
-/// configured path that fails to attach fails open (delivers, unmetered).
+/// This shared-memory enforcement is the DEFAULT: with `shared_state_path`
+/// unset every process attaches to [`DEFAULT_SHARED_STATE_PATH`], so the per-IP
+/// budget is authoritative out of the box. Setting it to `""` opts back out to
+/// a private per-process map (the old behavior — accurate only within one
+/// process). A configured path that fails to attach fails open (delivers,
+/// unmetered).
 ///
 /// Once an IP's bucket can't cover the next event, the rest of the batch is
 /// withheld ([`EventVerdict::Stop`]). A whitelisted connection is exempt
@@ -68,11 +81,21 @@ pub struct ReadBandwidth {
 
     /// Path to the shared-memory file holding the per-IP buckets, shared by every
     /// `noteguard read` process on the host (all must agree on the path and
-    /// `max_ips`). `None` (unset, or empty) => a private per-process map —
-    /// accurate only within one process, i.e. the pre-shared-memory behavior. Set
-    /// it to a `tmpfs` path such as `/dev/shm/noteguard-read-bandwidth` to enforce
-    /// ONE budget per IP across all read processes. A configured but unattachable
-    /// path fails open (delivers, unmetered).
+    /// `max_ips`). Three cases:
+    ///
+    /// - **Unset (`None`)** — the DEFAULT: attach to [`DEFAULT_SHARED_STATE_PATH`]
+    ///   so the per-IP budget is enforced across every read process out of the
+    ///   box. This is what you want; you shouldn't need to set it.
+    /// - **Empty (`""`)** — opt out to a private per-process map, accurate only
+    ///   within one process (the pre-shared-memory behavior). This DISABLES
+    ///   cross-process enforcement, so the effective per-IP limit becomes
+    ///   `bytes_per_minute × numThreads`. For hosts that can't use `tmpfs`, or
+    ///   tests that want a fresh isolated bucket.
+    /// - **A non-empty path** — attach to that file instead of the default (e.g.
+    ///   a different `tmpfs` location).
+    ///
+    /// A configured (or defaulted) path that fails to attach fails open
+    /// (delivers, unmetered).
     #[serde(default)]
     pub shared_state_path: Option<String>,
 
@@ -126,37 +149,46 @@ impl ReadBandwidth {
         })
     }
 
-    /// Build the byte-bucket store on first use (construction can't do I/O). A
-    /// configured `shared_state_path` opens a shared file; unset (or empty) uses
-    /// a private per-process map; a configured path that fails to attach records
+    /// Build the byte-bucket store on first use (construction can't do I/O).
+    /// `shared_state_path` unset defaults to the shared file at
+    /// [`DEFAULT_SHARED_STATE_PATH`] (cross-process enforcement, the default); an
+    /// explicit empty string opts out to a private per-process map; an explicit
+    /// non-empty path opens that file. A shared file that fails to attach records
     /// [`Store::Failed`] so the filter fails open (delivers, unmetered).
     fn ensure_store(&mut self) {
         if !matches!(self.store, Store::Uninit) {
             return;
         }
+        // Unset => the default shared path (enforce across processes). An explicit
+        // "" is the opt-out to a private per-process map. Any other string is that
+        // path verbatim.
         let path = match self.shared_state_path.as_deref() {
-            Some("") | None => None,
+            None => Some(DEFAULT_SHARED_STATE_PATH.to_string()),
+            Some("") => None,
             Some(p) => Some(p.to_string()),
         };
         self.store = match path {
             None => match SharedByteBuckets::anonymous(self.max_ips) {
                 Ok(m) => {
                     log::info!(
-                        "read_bandwidth: no shared_state_path; per-process byte buckets \
+                        "read_bandwidth: shared_state_path=\"\"; per-process byte buckets \
                          ({} slots) — cross-process enforcement is OFF",
                         m.slot_count()
                     );
                     Store::Map(m)
                 }
                 Err(e) => {
-                    log::error!("read_bandwidth: could not allocate byte buckets ({e}); failing open");
+                    log::error!(
+                        "read_bandwidth: could not allocate byte buckets ({e}); failing open"
+                    );
                     Store::Failed
                 }
             },
             Some(path) => match SharedByteBuckets::open(&path, self.max_ips) {
                 Ok(m) => {
                     log::info!(
-                        "read_bandwidth: shared byte buckets at {} ({} slots)",
+                        "read_bandwidth: shared byte buckets at {} ({} slots) — \
+                         cross-process enforcement is ON",
                         path,
                         m.slot_count()
                     );

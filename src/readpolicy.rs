@@ -422,6 +422,12 @@ mod tests {
 
     /// Build an engine from a `[readpolicy]`-inner TOML fragment (pipeline +
     /// filter tables), exercising the real registry + config path.
+    ///
+    /// NB: every `read_bandwidth` fragment below sets `shared_state_path = ""`
+    /// (the per-process opt-out). Unset, the filter now DEFAULTS to the shared
+    /// `/dev/shm` file, so tests would share (and pollute) one real host path and
+    /// cross-contaminate each other's buckets — `""` gives each test a fresh,
+    /// isolated, in-process map.
     fn engine(config: &str) -> ReadPolicy {
         let config: ReadPolicyConfig = toml::from_str(config).expect("test config parses");
         let mut engine = ReadPolicy::new();
@@ -550,6 +556,7 @@ mod tests {
             pipeline = ["read_bandwidth"]
             [filters.read_bandwidth]
             bytes_per_minute = 1000
+            shared_state_path = ""
         "#,
         );
         let open = engine
@@ -569,6 +576,7 @@ mod tests {
             pipeline = ["read_bandwidth"]
             [filters.read_bandwidth]
             bytes_per_minute = {}
+            shared_state_path = ""
         "#,
             size * 2 + 1
         ));
@@ -590,6 +598,7 @@ mod tests {
             pipeline = ["read_bandwidth"]
             [filters.read_bandwidth]
             bytes_per_minute = {}
+            shared_state_path = ""
         "#,
             size + 1
         ));
@@ -619,6 +628,7 @@ mod tests {
             [filters.read_bandwidth]
             bytes_per_minute = {}
             whitelist = ["5.5.5.5"]
+            shared_state_path = ""
         "#,
             size
         ));
@@ -647,6 +657,7 @@ mod tests {
             pipeline = ["read_bandwidth"]
             [filters.read_bandwidth]
             bytes_per_minute = {}
+            shared_state_path = ""
         "#,
             size + 1
         ));
@@ -786,6 +797,7 @@ mod tests {
             max = 5
             [filters.read_bandwidth]
             bytes_per_minute = {}
+            shared_state_path = ""
         "#,
             size * 2 + 1
         ));

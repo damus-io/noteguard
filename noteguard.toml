@@ -95,12 +95,16 @@ max = 5000
 [readpolicy.filters.read_bandwidth]
 bytes_per_minute = 5000000
 # Shared-memory buckets: strfry runs one plugin process per read-serving thread,
-# so without this the effective per-IP limit is up to `relay.numThreads.reqWorker
-# + reqMonitor` times `bytes_per_minute`. Point every process at one tmpfs file
-# and the per-IP budget becomes a single authoritative bucket across all of them
-# (see the README). Unset => per-process buckets (accurate only within one
-# process). Fails open (delivers) if the file can't be mapped or the table fills.
-# shared_state_path = "/dev/shm/noteguard-read-bandwidth"
+# so per-process buckets would make the effective per-IP limit up to
+# `relay.numThreads.reqWorker + reqMonitor` times `bytes_per_minute`. To enforce
+# ONE authoritative per-IP bucket, every process mmaps a single tmpfs file (see
+# the README). This is now the DEFAULT: leave `shared_state_path` unset and each
+# process attaches to /dev/shm/noteguard-read-bandwidth automatically — no config
+# needed for normal use. Fails open (delivers) if the file can't be mapped or the
+# table fills.
+#   shared_state_path = "/dev/shm/noteguard-read-bandwidth"  # the default path; set to override
+#   shared_state_path = ""  # OPT OUT: per-process buckets — DISABLES cross-process
+#                           # enforcement (for hosts that can't use tmpfs)
 # max_ips = 65536  # distinct IPs the shared table holds before it fails open
 # Exempt entries; each matches a connection's client IP OR its authed pubkey
 # hex. A whitelisted connection is never metered, so this filter asks for no

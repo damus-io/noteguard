@@ -296,6 +296,10 @@ max = 5000
 # in the batch are withheld.
 [readpolicy.filters.read_bandwidth]
 bytes_per_minute = 5000000
+# cross-process enforcement is ON by default: leave shared_state_path unset and
+# every read process attaches to /dev/shm/noteguard-read-bandwidth. Set it to ""
+# to opt out to per-process buckets, or to another tmpfs path to override.
+# shared_state_path = "/dev/shm/noteguard-read-bandwidth"
 # exempt entries: an entry matches a connection's client IP OR its authed pubkey
 # hex (optional). A whitelisted connection is never metered and takes the
 # passthrough fast path.
@@ -351,19 +355,24 @@ processes, making the effective per-IP budget up to `numThreads ×
 read_bandwidth.bytes_per_minute`.
 
 To enforce **one** authoritative budget per IP while keeping every read thread,
-set `read_bandwidth.shared_state_path` to a path on `tmpfs`
-(e.g. `/dev/shm/noteguard-read-bandwidth`): every `noteguard read` process on the
-host then `mmap`s the same file, a fixed open-addressing IP→bucket table guarded
-by per-slot spinlocks, so an IP's budget is a single shared bucket regardless of
-which process serves a given connection. The table sizes to `max_ips` distinct
-IPs (default 65536, no eviction — buckets must survive a reconnect) and *fails
-open* (delivers, unmetered) if it fills, if a slot lock can't be taken, or if the
+every `noteguard read` process on the host `mmap`s the same `tmpfs` file — a
+fixed open-addressing IP→bucket table guarded by per-slot spinlocks — so an IP's
+budget is a single shared bucket regardless of which process serves a given
+connection. **This is the default:** with `read_bandwidth.shared_state_path`
+unset, every process attaches to `/dev/shm/noteguard-read-bandwidth`
+automatically, so per-IP enforcement holds across processes out of the box — you
+don't need to configure anything. The table sizes to `max_ips` distinct IPs
+(default 65536, no eviction — buckets must survive a reconnect) and *fails open*
+(delivers, unmetered) if it fills, if a slot lock can't be taken, or if the
 `mmap` can't be created. It lives on `tmpfs`, so it survives strfry restarts and
-resets on reboot. Leaving `shared_state_path` unset keeps the old per-process
-behavior (accurate only within a single process). Only `read_bandwidth` needs
-this; `max_events_per_conn` is keyed by `connId`, which is already pinned to one
-process, so its counter is authoritative as-is. (The write-side `ratelimit`
-filter has the same per-process scoping and is unaffected by this key.)
+resets on reboot. Set `shared_state_path` to another `tmpfs` path to override the
+location, or to `""` to **opt out** to the old per-process behavior (accurate
+only within a single process, so the effective per-IP limit becomes
+`numThreads × bytes_per_minute` — for hosts that can't use `tmpfs`). Only
+`read_bandwidth` needs this; `max_events_per_conn` is keyed by `connId`, which is
+already pinned to one process, so its counter is authoritative as-is. (The
+write-side `ratelimit` filter has the same per-process scoping and is unaffected
+by this key.)
 
 ### NScript read filter (experimental)
 
